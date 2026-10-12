@@ -1,0 +1,65 @@
+[1mdiff --git a/docker-compose.yml b/docker-compose.yml[m
+[1mindex 0c3ef95..52204d9 100644[m
+[1m--- a/docker-compose.yml[m
+[1m+++ b/docker-compose.yml[m
+[36m@@ -43,12 +43,58 @@[m [mservices:[m
+       redis:[m
+         condition: service_healthy[m
+     healthcheck:[m
+[31m-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"][m
+[32m+[m[32m      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:8080/health"][m
+       interval: 5s[m
+       timeout: 3s[m
+       retries: 5[m
+       start_period: 3s[m
+ [m
+[32m+[m[32m  prometheus:[m
+[32m+[m[32m    image: prom/prometheus:latest[m
+[32m+[m[32m    restart: unless-stopped[m
+[32m+[m[32m    command:[m
+[32m+[m[32m      - "--config.file=/etc/prometheus/prometheus.yml"[m
+[32m+[m[32m      - "--storage.tsdb.path=/prometheus"[m
+[32m+[m[32m      - "--web.console.libraries=/usr/share/prometheus/console_libraries"[m
+[32m+[m[32m      - "--web.console.templates=/usr/share/prometheus/consoles"[m
+[32m+[m[32m    volumes:[m
+[32m+[m[32m      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro[m
+[32m+[m[32m      - prometheus-data:/prometheus[m
+[32m+[m[32m    ports:[m
+[32m+[m[32m      - "9090:9090"[m
+[32m+[m[32m    depends_on:[m
+[32m+[m[32m      gateway:[m
+[32m+[m[32m        condition: service_healthy[m
+[32m+[m[32m    healthcheck:[m
+[32m+[m[32m      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"][m
+[32m+[m[32m      interval: 5s[m
+[32m+[m[32m      timeout: 3s[m
+[32m+[m[32m      retries: 5[m
+[32m+[m[32m      start_period: 3s[m
+[32m+[m
+[32m+[m[32m  grafana:[m
+[32m+[m[32m    image: grafana/grafana:latest[m
+[32m+[m[32m    restart: unless-stopped[m
+[32m+[m[32m    environment:[m
+[32m+[m[32m      - GF_SECURITY_ADMIN_USER=admin[m
+[32m+[m[32m      - GF_SECURITY_ADMIN_PASSWORD=admin[m
+[32m+[m[32m      - GF_USERS_ALLOW_SIGN_UP=false[m
+[32m+[m[32m    volumes:[m
+[32m+[m[32m      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro[m
+[32m+[m[32m      - grafana-data:/var/lib/grafana[m
+[32m+[m[32m    ports:[m
+[32m+[m[32m      - "3000:3000"[m
+[32m+[m[32m    depends_on:[m
+[32m+[m[32m      prometheus:[m
+[32m+[m[32m        condition: service_healthy[m
+[32m+[m[32m    healthcheck:[m
+[32m+[m[32m      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"][m
+[32m+[m[32m      interval: 5s[m
+[32m+[m[32m      timeout: 3s[m
+[32m+[m[32m      retries: 5[m
+[32m+[m[32m      start_period: 5s[m
+[32m+[m
+ volumes:[m
+   redis-data:[m
+[31m-[m
+[32m+[m[32m  prometheus-data:[m
+[32m+[m[32m  grafana-data:[m
