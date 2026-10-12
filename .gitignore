@@ -1,0 +1,7 @@
+# Environment secrets
+.env
+
+# Go build artifacts
+gateway/gateway
+backend/backend
+
