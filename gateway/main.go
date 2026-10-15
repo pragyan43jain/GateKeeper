@@ -1,17 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -118,6 +125,244 @@ func (r *RedisRateLimiter) Allow(ctx context.Context, identity string) (RateLimi
 func hashAPIKey(apiKey string) string {
 	sum := sha256.Sum256([]byte(apiKey))
 	return hex.EncodeToString(sum[:])
+}
+
+// CircuitState represents the operational state of the circuit breaker.
+type CircuitState int
+
+const (
+	StateClosed CircuitState = iota
+	StateOpen
+	StateHalfOpen
+)
+
+func (s CircuitState) String() string {
+	switch s {
+	case StateClosed:
+		return "closed"
+	case StateOpen:
+		return "open"
+	case StateHalfOpen:
+		return "half-open"
+	default:
+		return "unknown"
+	}
+}
+
+// CircuitBreaker manages failure tracking and state transitions for upstream calls.
+type CircuitBreaker struct {
+	mu                  sync.Mutex
+	state               CircuitState
+	consecutiveFailures int
+	failureThreshold    int
+	cooldown            time.Duration
+	openedAt            time.Time
+	halfOpenInFlight    bool
+	clock               func() time.Time
+}
+
+// NewCircuitBreaker creates a new CircuitBreaker with the specified threshold and cooldown.
+// An optional clock function can be provided for deterministic testing.
+func NewCircuitBreaker(threshold int, cooldown time.Duration, clock ...func() time.Time) *CircuitBreaker {
+	if threshold <= 0 {
+		threshold = 5
+	}
+	if cooldown <= 0 {
+		cooldown = 10 * time.Second
+	}
+	var clk func() time.Time
+	if len(clock) > 0 && clock[0] != nil {
+		clk = clock[0]
+	}
+	return &CircuitBreaker{
+		state:            StateClosed,
+		failureThreshold: threshold,
+		cooldown:         cooldown,
+		clock:            clk,
+	}
+}
+
+// SetClock configures a custom clock function (used for deterministic testing).
+func (cb *CircuitBreaker) SetClock(clk func() time.Time) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.clock = clk
+}
+
+func (cb *CircuitBreaker) now() time.Time {
+	if cb.clock != nil {
+		return cb.clock()
+	}
+	return time.Now()
+}
+
+func (cb *CircuitBreaker) checkStateLocked() CircuitState {
+	if cb.state == StateOpen && cb.now().Sub(cb.openedAt) >= cb.cooldown {
+		cb.state = StateHalfOpen
+		cb.halfOpenInFlight = false
+	}
+	return cb.state
+}
+
+// State returns the current circuit breaker state.
+func (cb *CircuitBreaker) State() CircuitState {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.checkStateLocked()
+}
+
+// ConsecutiveFailures returns the current count of consecutive transport failures.
+func (cb *CircuitBreaker) ConsecutiveFailures() int {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.consecutiveFailures
+}
+
+// beforeRequest determines if a request should be permitted.
+// Returns:
+//
+//	allowed: whether the request is allowed through
+//	isProbe: whether this request is the single half-open trial probe
+//	retryAfter: in seconds, if not allowed
+func (cb *CircuitBreaker) beforeRequest() (allowed bool, isProbe bool, retryAfter int64) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	state := cb.checkStateLocked()
+
+	switch state {
+	case StateClosed:
+		return true, false, 0
+
+	case StateHalfOpen:
+		if cb.halfOpenInFlight {
+			// Another request is currently probing; fail fast
+			return false, false, 1
+		}
+		// Claim the single trial probe
+		cb.halfOpenInFlight = true
+		return true, true, 0
+
+	case StateOpen:
+		remaining := cb.cooldown - cb.now().Sub(cb.openedAt)
+		retrySecs := int64(math.Ceil(remaining.Seconds()))
+		if retrySecs < 1 {
+			retrySecs = 1
+		}
+		return false, false, retrySecs
+
+	default:
+		return true, false, 0
+	}
+}
+
+// afterRequest records the outcome of a transport attempt.
+func (cb *CircuitBreaker) afterRequest(isProbe bool, err error) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if isProbe {
+		cb.halfOpenInFlight = false
+		if err != nil {
+			// Probe failed: reopen circuit and reset cooldown timer
+			cb.state = StateOpen
+			cb.openedAt = cb.now()
+		} else {
+			// Probe succeeded: close circuit and clear failures
+			cb.state = StateClosed
+			cb.consecutiveFailures = 0
+		}
+		return
+	}
+
+	// Normal (non-probe) request
+	if err != nil {
+		if cb.state == StateClosed {
+			cb.consecutiveFailures++
+			if cb.consecutiveFailures >= cb.failureThreshold {
+				cb.state = StateOpen
+				cb.openedAt = cb.now()
+			}
+		}
+	} else {
+		// Successful response resets consecutive failure counter if in closed state
+		if cb.state == StateClosed {
+			cb.consecutiveFailures = 0
+		}
+	}
+}
+
+// CircuitBreakerTransport wraps an http.RoundTripper with circuit breaking logic.
+type CircuitBreakerTransport struct {
+	cb   *CircuitBreaker
+	base http.RoundTripper
+}
+
+// NewCircuitBreakerTransport creates an http.RoundTripper that guards the base transport with a circuit breaker.
+func NewCircuitBreakerTransport(cb *CircuitBreaker, base http.RoundTripper) *CircuitBreakerTransport {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return &CircuitBreakerTransport{
+		cb:   cb,
+		base: base,
+	}
+}
+
+// RoundTrip executes an HTTP round trip with circuit breaker protections.
+func (t *CircuitBreakerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	allowed, isProbe, retryAfter := t.cb.beforeRequest()
+	if !allowed {
+		return t.openCircuitResponse(req, retryAfter), nil
+	}
+
+	var (
+		resp *http.Response
+		err  error
+		done bool
+	)
+	defer func() {
+		if !done {
+			// In case of panic or abrupt termination, record failure
+			t.cb.afterRequest(isProbe, errors.New("upstream transport terminated abnormally"))
+		}
+	}()
+
+	resp, err = t.base.RoundTrip(req)
+	done = true
+	t.cb.afterRequest(isProbe, err)
+	return resp, err
+}
+
+func (t *CircuitBreakerTransport) openCircuitResponse(req *http.Request, retryAfter int64) *http.Response {
+	bodyMsg := fmt.Sprintf("Service Unavailable: circuit breaker is open. Retry after %d seconds\n", retryAfter)
+	bodyBytes := []byte(bodyMsg)
+
+	header := make(http.Header)
+	header.Set("Content-Type", "text/plain; charset=utf-8")
+	header.Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+	header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+
+	proto := "HTTP/1.1"
+	protoMajor := 1
+	protoMinor := 1
+	if req != nil && req.Proto != "" {
+		proto = req.Proto
+		protoMajor = req.ProtoMajor
+		protoMinor = req.ProtoMinor
+	}
+
+	return &http.Response{
+		StatusCode:    http.StatusServiceUnavailable,
+		Status:        "503 Service Unavailable",
+		Proto:         proto,
+		ProtoMajor:    protoMajor,
+		ProtoMinor:    protoMinor,
+		Header:        header,
+		Body:          io.NopCloser(bytes.NewReader(bodyBytes)),
+		ContentLength: int64(len(bodyBytes)),
+		Request:       req,
+	}
 }
 
 // statusResponseWriter captures the response HTTP status code and delegates standard ResponseWriter methods.
@@ -331,6 +576,36 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 	return defaultVal
 }
 
+func parseEnvIntPositive(key string, defaultVal int) (int, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal, nil
+	}
+	i, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value %q: %w", key, val, err)
+	}
+	if i <= 0 {
+		return 0, fmt.Errorf("%s must be greater than 0, got %d", key, i)
+	}
+	return i, nil
+}
+
+func parseEnvDurationPositive(key string, defaultVal time.Duration) (time.Duration, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return defaultVal, nil
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value %q: %w", key, val, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be greater than 0, got %v", key, d)
+	}
+	return d, nil
+}
+
 func main() {
 	// Read the API key from the environment.
 	apiKey := os.Getenv("GATEKEEPER_API_KEY")
@@ -344,7 +619,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid backend URL: %v", err)
 	}
+
+	// Circuit breaker configuration.
+	cbThreshold, err := parseEnvIntPositive("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
+	cbCooldown, err := parseEnvDurationPositive("CIRCUIT_BREAKER_COOLDOWN", 10*time.Second)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
+	cb := NewCircuitBreaker(cbThreshold, cbCooldown)
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = NewCircuitBreakerTransport(cb, http.DefaultTransport)
 
 	// Redis connection settings.
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
@@ -369,12 +658,47 @@ func main() {
 	handler := newGatewayHandler(apiKey, proxy, limiter, metrics)
 
 	port := getEnv("PORT", "8080")
+
 	server := &http.Server{
 		Addr:              ":" + port,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("Gatekeeper running at http://localhost:%s (backend: %s, redis: %s)", port, backendURL, redisAddr)
-	log.Fatal(server.ListenAndServe())
+	log.Printf("Gatekeeper running at http://localhost:%s (backend: %s, redis: %s, cb_threshold: %d, cb_cooldown: %s)", port, backendURL, redisAddr, cbThreshold, cbCooldown)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.ListenAndServe()
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	select {
+	case err := <-serverErr:
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server error: %v", err)
+		}
+
+	case sig := <-sigCh:
+		log.Printf("Received %s; shutting down gracefully", sig)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("Graceful shutdown failed: %v; forcing close", err)
+			if closeErr := server.Close(); closeErr != nil {
+				log.Printf("Forced close failed: %v", closeErr)
+			}
+		}
+
+		if err := <-serverErr; err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP server error during shutdown: %v", err)
+		}
+	}
+
 }

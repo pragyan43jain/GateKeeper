@@ -18,7 +18,16 @@ services:
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:8081/api/students"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--tries=1",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8081/api/students",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -37,13 +46,24 @@ services:
       - PORT=8080
       - GATEKEEPER_API_KEY=${GATEKEEPER_API_KEY}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD=${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
+      - CIRCUIT_BREAKER_COOLDOWN=${CIRCUIT_BREAKER_COOLDOWN:-10s}
     depends_on:
       backend:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--tries=1",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/health",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -66,7 +86,16 @@ services:
       gateway:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--tries=1",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:9090/-/healthy",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -88,7 +117,16 @@ services:
       prometheus:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--tries=1",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:3000/api/health",
+        ]
       interval: 5s
       timeout: 3s
       retries: 5

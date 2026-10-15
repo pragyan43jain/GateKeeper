@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -583,5 +586,656 @@ func TestMetrics_StatusResponseWriterFlusherAndUnwrap(t *testing.T) {
 
 	if srw.Unwrap() != mock {
 		t.Fatal("expected Unwrap() to return underlying ResponseWriter")
+	}
+}
+
+// fakeRoundTripper enables deterministic testing of upstream transport behavior.
+type fakeRoundTripper struct {
+	mu         sync.Mutex
+	calls      int
+	statusCode int
+	body       string
+	err        error
+	onCall     func(req *http.Request) (*http.Response, error)
+}
+
+func (f *fakeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	f.calls++
+	onCall := f.onCall
+	statusCode := f.statusCode
+	body := f.body
+	err := f.err
+	f.mu.Unlock()
+
+	if onCall != nil {
+		return onCall(req)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+
+	return &http.Response{
+		StatusCode:    statusCode,
+		Status:        fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+		Request:       req,
+	}, nil
+}
+
+func (f *fakeRoundTripper) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newFakeClock(start time.Time) *fakeClock {
+	return &fakeClock{now: start}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// TestCircuitBreaker_ClosedPermitsRequests verifies requests succeed through a closed circuit.
+func TestCircuitBreaker_ClosedPermitsRequests(t *testing.T) {
+	cb := NewCircuitBreaker(3, 10*time.Second)
+	fake := &fakeRoundTripper{statusCode: http.StatusOK, body: `{"status":"ok"}`}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	rr := httptest.NewRecorder()
+
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rr.Code)
+	}
+	if fake.Calls() != 1 {
+		t.Fatalf("expected 1 call to transport, got %d", fake.Calls())
+	}
+	if cb.State() != StateClosed {
+		t.Fatalf("expected circuit to be closed, got %s", cb.State())
+	}
+	if cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected 0 failures, got %d", cb.ConsecutiveFailures())
+	}
+}
+
+// TestCircuitBreaker_RepeatedErrorsOpenAndThresholdReceives502 verifies that consecutive failures
+// open the circuit and that the threshold-triggering request receives 502 Bad Gateway.
+func TestCircuitBreaker_RepeatedErrorsOpenAndThresholdReceives502(t *testing.T) {
+	threshold := 3
+	cb := NewCircuitBreaker(threshold, 10*time.Second)
+	fake := &fakeRoundTripper{err: errors.New("dial tcp: connection refused")}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	for i := 1; i <= threshold; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		rr := httptest.NewRecorder()
+
+		proxy.ServeHTTP(rr, req)
+
+		// Each transport failure returns 502 Bad Gateway
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("request %d: expected 502 Bad Gateway, got %d", i, rr.Code)
+		}
+
+		if cb.ConsecutiveFailures() != i {
+			t.Fatalf("request %d: expected %d consecutive failures, got %d", i, i, cb.ConsecutiveFailures())
+		}
+
+		if i < threshold {
+			if cb.State() != StateClosed {
+				t.Fatalf("request %d: expected circuit to still be closed, got %s", i, cb.State())
+			}
+		} else {
+			// The threshold-triggering request opens the circuit
+			if cb.State() != StateOpen {
+				t.Fatalf("threshold request %d: expected circuit to transition to Open, got %s", i, cb.State())
+			}
+		}
+	}
+
+	if fake.Calls() != threshold {
+		t.Fatalf("expected exactly %d transport attempts, got %d", threshold, fake.Calls())
+	}
+}
+
+// TestCircuitBreaker_OpenReturns503WithoutCallingTransport verifies that requests while open receive
+// 503 Service Unavailable and a Retry-After header without calling the backend transport.
+func TestCircuitBreaker_OpenReturns503WithoutCallingTransport(t *testing.T) {
+	threshold := 2
+	cooldown := 10 * time.Second
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreaker(threshold, cooldown, clock.Now)
+	fake := &fakeRoundTripper{err: errors.New("dial tcp: connection refused")}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	// Trip the circuit breaker
+	for i := 0; i < threshold; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		rr := httptest.NewRecorder()
+		proxy.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("expected 502, got %d", rr.Code)
+		}
+	}
+
+	if cb.State() != StateOpen {
+		t.Fatalf("expected circuit to be open, got %s", cb.State())
+	}
+	initialCalls := fake.Calls()
+
+	// Advance time partially (4 seconds into 10s cooldown -> 6 seconds remaining)
+	clock.Advance(4 * time.Second)
+
+	// Request while open must return 503 with Retry-After header
+	req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	rr := httptest.NewRecorder()
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable, got %d", rr.Code)
+	}
+
+	retryAfter := rr.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("expected Retry-After header to be present on 503 response")
+	}
+	retrySecs, err := strconv.Atoi(retryAfter)
+	if err != nil || retrySecs != 6 {
+		t.Fatalf("expected Retry-After to be 6 seconds, got %q (err: %v)", retryAfter, err)
+	}
+
+	if !strings.Contains(rr.Body.String(), "circuit breaker is open") {
+		t.Fatalf("expected body to contain 'circuit breaker is open', got: %q", rr.Body.String())
+	}
+
+	// Verify the backend transport was NOT called
+	if fake.Calls() != initialCalls {
+		t.Fatalf("expected backend transport not to be called while open; calls went from %d to %d", initialCalls, fake.Calls())
+	}
+}
+
+// TestCircuitBreaker_HalfOpenAllowsSingleProbeUnderConcurrency verifies that when half-open,
+// exactly one probe request runs while concurrent requests fail fast with 503.
+func TestCircuitBreaker_HalfOpenAllowsSingleProbeUnderConcurrency(t *testing.T) {
+	threshold := 2
+	cooldown := 10 * time.Second
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreaker(threshold, cooldown, clock.Now)
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+
+	fake := &fakeRoundTripper{
+		onCall: func(req *http.Request) (*http.Response, error) {
+			select {
+			case <-probeStarted:
+			default:
+				close(probeStarted)
+			}
+			<-releaseProbe
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader(`{"probe":"ok"}`)),
+				ContentLength: 14,
+				Request:       req,
+			}, nil
+		},
+	}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	// Trip the circuit breaker
+	cb.afterRequest(false, errors.New("trip-1"))
+	cb.afterRequest(false, errors.New("trip-2"))
+	if cb.State() != StateOpen {
+		t.Fatalf("expected StateOpen, got %s", cb.State())
+	}
+
+	// Advance clock past cooldown
+	clock.Advance(cooldown + 1*time.Second)
+
+	// Launch probe request in background goroutine
+	probeCodeCh := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		rr := httptest.NewRecorder()
+		proxy.ServeHTTP(rr, req)
+		probeCodeCh <- rr.Code
+	}()
+
+	// Wait until the probe has actually reached fake transport and is blocked
+	select {
+	case <-probeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for probe to start")
+	}
+
+	// While the probe is in-flight, send 10 concurrent requests
+	const concurrentCount = 10
+	var wg sync.WaitGroup
+	fastFailCodes := make([]int, concurrentCount)
+
+	for i := 0; i < concurrentCount; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+			rr := httptest.NewRecorder()
+			proxy.ServeHTTP(rr, req)
+			fastFailCodes[idx] = rr.Code
+		}(i)
+	}
+
+	wg.Wait()
+
+	// All concurrent requests must have failed fast with 503
+	for i, code := range fastFailCodes {
+		if code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent request %d: expected 503, got %d", i, code)
+		}
+	}
+
+	// Now release the blocked probe
+	close(releaseProbe)
+
+	probeCode := <-probeCodeCh
+	if probeCode != http.StatusOK {
+		t.Fatalf("expected probe request to succeed with 200 OK, got %d", probeCode)
+	}
+
+	// Exactly 1 request reached the fake transport
+	if fake.Calls() != 1 {
+		t.Fatalf("expected exactly 1 call to fake transport during probe, got %d", fake.Calls())
+	}
+
+	// Circuit breaker should now be closed because the probe succeeded
+	if cb.State() != StateClosed {
+		t.Fatalf("expected circuit to transition to Closed after successful probe, got %s", cb.State())
+	}
+}
+
+// TestCircuitBreaker_SuccessfulProbeClosesCircuit verifies a successful probe closes the circuit.
+func TestCircuitBreaker_SuccessfulProbeClosesCircuit(t *testing.T) {
+	threshold := 2
+	cooldown := 10 * time.Second
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreaker(threshold, cooldown, clock.Now)
+
+	var shouldFail bool
+	fake := &fakeRoundTripper{
+		onCall: func(req *http.Request) (*http.Response, error) {
+			if shouldFail {
+				return nil, errors.New("upstream unreachable")
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		},
+	}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	// Trip to open
+	shouldFail = true
+	for i := 0; i < threshold; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		rr := httptest.NewRecorder()
+		proxy.ServeHTTP(rr, req)
+	}
+	if cb.State() != StateOpen {
+		t.Fatalf("expected StateOpen, got %s", cb.State())
+	}
+
+	// Cooldown expires, upstream recovers
+	clock.Advance(cooldown)
+	shouldFail = false
+
+	// Trial probe request
+	req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	rr := httptest.NewRecorder()
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected probe to return 200, got %d", rr.Code)
+	}
+
+	if cb.State() != StateClosed {
+		t.Fatalf("expected circuit to be Closed, got %s", cb.State())
+	}
+	if cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected 0 failures, got %d", cb.ConsecutiveFailures())
+	}
+
+	// Subsequent requests continue to succeed
+	req2 := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	rr2 := httptest.NewRecorder()
+	proxy.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected subsequent request to return 200, got %d", rr2.Code)
+	}
+}
+
+// TestCircuitBreaker_FailedProbeReopensCircuit verifies that a failed probe reopens the circuit.
+func TestCircuitBreaker_FailedProbeReopensCircuit(t *testing.T) {
+	threshold := 2
+	cooldown := 10 * time.Second
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreaker(threshold, cooldown, clock.Now)
+	fake := &fakeRoundTripper{err: errors.New("upstream still down")}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	// Trip breaker
+	for i := 0; i < threshold; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		rr := httptest.NewRecorder()
+		proxy.ServeHTTP(rr, req)
+	}
+	if cb.State() != StateOpen {
+		t.Fatalf("expected StateOpen, got %s", cb.State())
+	}
+
+	// Cooldown elapses
+	clock.Advance(cooldown)
+
+	// Probe request fails
+	probeReq := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	probeRR := httptest.NewRecorder()
+	proxy.ServeHTTP(probeRR, probeReq)
+
+	if probeRR.Code != http.StatusBadGateway {
+		t.Fatalf("expected probe failure to return 502, got %d", probeRR.Code)
+	}
+
+	// Circuit must be Open again
+	if cb.State() != StateOpen {
+		t.Fatalf("expected circuit to reopen to StateOpen, got %s", cb.State())
+	}
+
+	callsAfterProbe := fake.Calls()
+
+	// Immediate next request must fail fast with 503 without calling transport
+	nextReq := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	nextRR := httptest.NewRecorder()
+	proxy.ServeHTTP(nextRR, nextReq)
+
+	if nextRR.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 after reopened probe, got %d", nextRR.Code)
+	}
+	if fake.Calls() != callsAfterProbe {
+		t.Fatalf("expected no additional transport calls while reopened")
+	}
+}
+
+// TestCircuitBreaker_Backend500DoesNotTripBreaker verifies that backend HTTP 500 responses
+// do not count as transport failures.
+func TestCircuitBreaker_Backend500DoesNotTripBreaker(t *testing.T) {
+	cb := NewCircuitBreaker(2, 10*time.Second)
+	fake := &fakeRoundTripper{
+		statusCode: http.StatusInternalServerError,
+		body:       `{"error":"database query failed"}`,
+	}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	for i := 1; i <= 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		rr := httptest.NewRecorder()
+		proxy.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("request %d: expected 500, got %d", i, rr.Code)
+		}
+	}
+
+	if cb.State() != StateClosed {
+		t.Fatalf("expected circuit to remain Closed on 500 responses, got %s", cb.State())
+	}
+	if cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected consecutive failures to remain 0 on 500 responses, got %d", cb.ConsecutiveFailures())
+	}
+	if fake.Calls() != 5 {
+		t.Fatalf("expected 5 calls to backend, got %d", fake.Calls())
+	}
+}
+
+// TestCircuitBreaker_AuthAndRateLimitDoNotAffectBreaker verifies that gateway 401 and 429
+// responses do not affect circuit breaker counters or state.
+func TestCircuitBreaker_AuthAndRateLimitDoNotAffectBreaker(t *testing.T) {
+	cb := NewCircuitBreaker(2, 10*time.Second)
+	fake := &fakeRoundTripper{statusCode: http.StatusOK, body: `{"status":"ok"}`}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	rdb, prefix := setupTestRedis(t)
+	limiter := NewRedisRateLimiter(rdb, prefix, 2, 60*time.Second)
+	handler := newGatewayHandler(testAPIKey, proxy, limiter)
+
+	// 1. Missing API key -> 401
+	reqMissing := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	rrMissing := httptest.NewRecorder()
+	handler.ServeHTTP(rrMissing, reqMissing)
+	if rrMissing.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rrMissing.Code)
+	}
+
+	// 2. Invalid API key -> 401
+	reqInvalid := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	reqInvalid.Header.Set("X-API-Key", "wrong-key")
+	rrInvalid := httptest.NewRecorder()
+	handler.ServeHTTP(rrInvalid, reqInvalid)
+	if rrInvalid.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rrInvalid.Code)
+	}
+
+	// Assert transport was not called and breaker state is untouched
+	if fake.Calls() != 0 {
+		t.Fatalf("expected 0 calls to transport for 401s, got %d", fake.Calls())
+	}
+	if cb.State() != StateClosed || cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected breaker to remain closed with 0 failures after 401s")
+	}
+
+	// 3. Send 2 valid authenticated requests within limit
+	for i := 1; i <= 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200 OK, got %d", i, rr.Code)
+		}
+	}
+	if fake.Calls() != 2 {
+		t.Fatalf("expected 2 calls to transport, got %d", fake.Calls())
+	}
+
+	// 4. Send 3rd request -> 429 Too Many Requests
+	reqExceeded := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	reqExceeded.Header.Set("X-API-Key", testAPIKey)
+	rrExceeded := httptest.NewRecorder()
+	handler.ServeHTTP(rrExceeded, reqExceeded)
+	if rrExceeded.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", rrExceeded.Code)
+	}
+
+	// Transport must still be at 2 calls; breaker untouched
+	if fake.Calls() != 2 {
+		t.Fatalf("expected 2 calls to transport (rate limit must not call backend), got %d", fake.Calls())
+	}
+	if cb.State() != StateClosed || cb.ConsecutiveFailures() != 0 {
+		t.Fatalf("expected breaker to remain closed with 0 failures after 429")
+	}
+}
+
+// TestCircuitBreaker_RaceSafety verifies that concurrent operations on CircuitBreaker
+// and CircuitBreakerTransport are thread-safe and race-free.
+func TestCircuitBreaker_RaceSafety(t *testing.T) {
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreaker(3, 50*time.Millisecond, clock.Now)
+
+	var counter int64
+	fake := &fakeRoundTripper{
+		onCall: func(req *http.Request) (*http.Response, error) {
+			c := atomic.AddInt64(&counter, 1)
+			if c%3 == 0 {
+				return nil, errors.New("simulated network failure")
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		},
+	}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	const workers = 50
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if workerID%5 == 0 {
+					clock.Advance(10 * time.Millisecond)
+				}
+				req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+				rr := httptest.NewRecorder()
+				proxy.ServeHTTP(rr, req)
+
+				_ = cb.State()
+				_ = cb.ConsecutiveFailures()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+// TestCircuitBreaker_ConfigurationValidation tests configuration parsing and validation.
+func TestCircuitBreaker_ConfigurationValidation(t *testing.T) {
+	// 1. Defaults when unset
+	os.Unsetenv("TEST_CB_THRESHOLD")
+	os.Unsetenv("TEST_CB_COOLDOWN")
+
+	th, err := parseEnvIntPositive("TEST_CB_THRESHOLD", 5)
+	if err != nil || th != 5 {
+		t.Fatalf("expected default 5, got %d (err: %v)", th, err)
+	}
+
+	cd, err := parseEnvDurationPositive("TEST_CB_COOLDOWN", 10*time.Second)
+	if err != nil || cd != 10*time.Second {
+		t.Fatalf("expected default 10s, got %v (err: %v)", cd, err)
+	}
+
+	// 2. Valid positive values
+	os.Setenv("TEST_CB_THRESHOLD", "10")
+	os.Setenv("TEST_CB_COOLDOWN", "30s")
+	defer func() {
+		os.Unsetenv("TEST_CB_THRESHOLD")
+		os.Unsetenv("TEST_CB_COOLDOWN")
+	}()
+
+	th, err = parseEnvIntPositive("TEST_CB_THRESHOLD", 5)
+	if err != nil || th != 10 {
+		t.Fatalf("expected 10, got %d (err: %v)", th, err)
+	}
+
+	cd, err = parseEnvDurationPositive("TEST_CB_COOLDOWN", 10*time.Second)
+	if err != nil || cd != 30*time.Second {
+		t.Fatalf("expected 30s, got %v (err: %v)", cd, err)
+	}
+
+	// 3. Invalid formats
+	os.Setenv("TEST_CB_THRESHOLD", "invalid")
+	if _, err := parseEnvIntPositive("TEST_CB_THRESHOLD", 5); err == nil {
+		t.Fatal("expected error on non-numeric threshold")
+	}
+
+	os.Setenv("TEST_CB_COOLDOWN", "not-a-duration")
+	if _, err := parseEnvDurationPositive("TEST_CB_COOLDOWN", 10*time.Second); err == nil {
+		t.Fatal("expected error on invalid duration")
+	}
+
+	// 4. Zero and negative values
+	os.Setenv("TEST_CB_THRESHOLD", "0")
+	if _, err := parseEnvIntPositive("TEST_CB_THRESHOLD", 5); err == nil {
+		t.Fatal("expected error on 0 threshold")
+	}
+
+	os.Setenv("TEST_CB_THRESHOLD", "-2")
+	if _, err := parseEnvIntPositive("TEST_CB_THRESHOLD", 5); err == nil {
+		t.Fatal("expected error on negative threshold")
+	}
+
+	os.Setenv("TEST_CB_COOLDOWN", "0s")
+	if _, err := parseEnvDurationPositive("TEST_CB_COOLDOWN", 10*time.Second); err == nil {
+		t.Fatal("expected error on 0s cooldown")
+	}
+
+	os.Setenv("TEST_CB_COOLDOWN", "-5s")
+	if _, err := parseEnvDurationPositive("TEST_CB_COOLDOWN", 10*time.Second); err == nil {
+		t.Fatal("expected error on negative cooldown")
 	}
 }
