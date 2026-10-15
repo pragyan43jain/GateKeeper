@@ -159,6 +159,7 @@ type CircuitBreaker struct {
 	openedAt            time.Time
 	halfOpenInFlight    bool
 	clock               func() time.Time
+	metrics             *GatewayMetrics
 }
 
 // NewCircuitBreaker creates a new CircuitBreaker with the specified threshold and cooldown.
@@ -189,6 +190,16 @@ func (cb *CircuitBreaker) SetClock(clk func() time.Time) {
 	cb.clock = clk
 }
 
+// SetMetrics attaches GatewayMetrics to the circuit breaker for state and trip tracking.
+func (cb *CircuitBreaker) SetMetrics(m *GatewayMetrics) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.metrics = m
+	if m != nil && m.circuitBreakerState != nil {
+		m.circuitBreakerState.Set(float64(cb.state))
+	}
+}
+
 func (cb *CircuitBreaker) now() time.Time {
 	if cb.clock != nil {
 		return cb.clock()
@@ -196,10 +207,40 @@ func (cb *CircuitBreaker) now() time.Time {
 	return time.Now()
 }
 
+func (cb *CircuitBreaker) transitionToOpenLocked() {
+	cb.state = StateOpen
+	cb.openedAt = cb.now()
+	cb.halfOpenInFlight = false
+	if cb.metrics != nil {
+		if cb.metrics.circuitBreakerState != nil {
+			cb.metrics.circuitBreakerState.Set(float64(StateOpen))
+		}
+		if cb.metrics.circuitBreakerTrips != nil {
+			cb.metrics.circuitBreakerTrips.Inc()
+		}
+	}
+}
+
+func (cb *CircuitBreaker) transitionToHalfOpenLocked() {
+	cb.state = StateHalfOpen
+	cb.halfOpenInFlight = false
+	if cb.metrics != nil && cb.metrics.circuitBreakerState != nil {
+		cb.metrics.circuitBreakerState.Set(float64(StateHalfOpen))
+	}
+}
+
+func (cb *CircuitBreaker) transitionToClosedLocked() {
+	cb.state = StateClosed
+	cb.consecutiveFailures = 0
+	cb.halfOpenInFlight = false
+	if cb.metrics != nil && cb.metrics.circuitBreakerState != nil {
+		cb.metrics.circuitBreakerState.Set(float64(StateClosed))
+	}
+}
+
 func (cb *CircuitBreaker) checkStateLocked() CircuitState {
 	if cb.state == StateOpen && cb.now().Sub(cb.openedAt) >= cb.cooldown {
-		cb.state = StateHalfOpen
-		cb.halfOpenInFlight = false
+		cb.transitionToHalfOpenLocked()
 	}
 	return cb.state
 }
@@ -262,15 +303,12 @@ func (cb *CircuitBreaker) afterRequest(isProbe bool, err error) {
 	defer cb.mu.Unlock()
 
 	if isProbe {
-		cb.halfOpenInFlight = false
 		if err != nil {
 			// Probe failed: reopen circuit and reset cooldown timer
-			cb.state = StateOpen
-			cb.openedAt = cb.now()
+			cb.transitionToOpenLocked()
 		} else {
 			// Probe succeeded: close circuit and clear failures
-			cb.state = StateClosed
-			cb.consecutiveFailures = 0
+			cb.transitionToClosedLocked()
 		}
 		return
 	}
@@ -280,8 +318,7 @@ func (cb *CircuitBreaker) afterRequest(isProbe bool, err error) {
 		if cb.state == StateClosed {
 			cb.consecutiveFailures++
 			if cb.consecutiveFailures >= cb.failureThreshold {
-				cb.state = StateOpen
-				cb.openedAt = cb.now()
+				cb.transitionToOpenLocked()
 			}
 		}
 	} else {
@@ -412,6 +449,8 @@ type GatewayMetrics struct {
 	requestsTotal       *prometheus.CounterVec
 	requestDuration     *prometheus.HistogramVec
 	rateLimitRejections prometheus.Counter
+	circuitBreakerState prometheus.Gauge
+	circuitBreakerTrips prometheus.Counter
 }
 
 // NewGatewayMetrics initializes and registers Gatekeeper metrics with the given registry.
@@ -443,9 +482,22 @@ func NewGatewayMetrics(reg *prometheus.Registry) *GatewayMetrics {
 				Help: "Total number of requests rejected due to rate limiting (HTTP 429).",
 			},
 		),
+		circuitBreakerState: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "gateway_circuit_breaker_state",
+				Help: "Current state of the gateway circuit breaker (0=closed, 1=open, 2=half-open).",
+			},
+		),
+		circuitBreakerTrips: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "gateway_circuit_breaker_trips_total",
+				Help: "Total number of times the circuit breaker has transitioned into the open state.",
+			},
+		),
 	}
 
-	reg.MustRegister(m.requestsTotal, m.requestDuration, m.rateLimitRejections)
+	m.circuitBreakerState.Set(float64(StateClosed))
+	reg.MustRegister(m.requestsTotal, m.requestDuration, m.rateLimitRejections, m.circuitBreakerState, m.circuitBreakerTrips)
 	return m
 }
 
@@ -481,6 +533,13 @@ func newGatewayHandler(apiKey string, proxy http.Handler, limiter RateLimiter, m
 		m = metrics[0]
 	} else {
 		m = NewGatewayMetrics(prometheus.NewRegistry())
+	}
+
+	// Connect circuit breaker to metrics if proxy wraps a CircuitBreakerTransport
+	if rp, ok := proxy.(*httputil.ReverseProxy); ok {
+		if cbt, ok := rp.Transport.(*CircuitBreakerTransport); ok && cbt.cb != nil {
+			cbt.cb.SetMetrics(m)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -546,7 +605,14 @@ func newGatewayHandler(apiKey string, proxy http.Handler, limiter RateLimiter, m
 	})
 
 	// Dedicated metrics endpoint using Prometheus format. Unauthenticated and sensitive-data free.
-	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if rp, ok := proxy.(*httputil.ReverseProxy); ok {
+			if cbt, ok := rp.Transport.(*CircuitBreakerTransport); ok && cbt.cb != nil {
+				_ = cbt.cb.State()
+			}
+		}
+		promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	})
 
 	return m.InstrumentHandler(mux)
 }
@@ -654,6 +720,7 @@ func main() {
 
 	limiter := NewRedisRateLimiter(rdb, keyPrefix, maxRequests, window)
 	metrics := NewGatewayMetrics(prometheus.NewRegistry())
+	cb.SetMetrics(metrics)
 
 	handler := newGatewayHandler(apiKey, proxy, limiter, metrics)
 

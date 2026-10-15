@@ -400,6 +400,12 @@ func TestMetrics_EndpointAccessibleWithoutAuth(t *testing.T) {
 	if !strings.Contains(body, "gateway_rate_limit_rejections_total") {
 		t.Errorf("expected /metrics output to contain 'gateway_rate_limit_rejections_total', got:\n%s", body)
 	}
+	if !strings.Contains(body, "gateway_circuit_breaker_state") {
+		t.Errorf("expected /metrics output to contain 'gateway_circuit_breaker_state', got:\n%s", body)
+	}
+	if !strings.Contains(body, "gateway_circuit_breaker_trips_total") {
+		t.Errorf("expected /metrics output to contain 'gateway_circuit_breaker_trips_total', got:\n%s", body)
+	}
 }
 
 // TestMetrics_ExcludesMetricsScrapes verifies that /metrics scrapes are not counted in application request metrics.
@@ -1149,6 +1155,9 @@ func TestCircuitBreaker_RaceSafety(t *testing.T) {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
 
+	metrics := NewGatewayMetrics(prometheus.NewRegistry())
+	cb.SetMetrics(metrics)
+
 	const workers = 50
 	var wg sync.WaitGroup
 
@@ -1238,4 +1247,144 @@ func TestCircuitBreaker_ConfigurationValidation(t *testing.T) {
 	if _, err := parseEnvDurationPositive("TEST_CB_COOLDOWN", 10*time.Second); err == nil {
 		t.Fatal("expected error on negative cooldown")
 	}
+}
+
+// TestMetrics_CircuitBreakerStateAndTrips verifies that circuit breaker state transitions
+// correctly update gateway_circuit_breaker_state and gateway_circuit_breaker_trips_total.
+func TestMetrics_CircuitBreakerStateAndTrips(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	metrics := NewGatewayMetrics(reg)
+
+	clock := newFakeClock(time.Now())
+	cb := NewCircuitBreaker(2, 10*time.Second, clock.Now)
+	cb.SetMetrics(metrics)
+
+	var shouldFail bool
+	fake := &fakeRoundTripper{
+		onCall: func(req *http.Request) (*http.Response, error) {
+			if shouldFail {
+				return nil, errors.New("upstream failure")
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		},
+	}
+
+	targetURL, _ := url.Parse("http://backend.internal")
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy.Transport = NewCircuitBreakerTransport(cb, fake)
+
+	mockLimiter := &mockLimiterAllowed{}
+	handler := newGatewayHandler(testAPIKey, proxy, mockLimiter, metrics)
+
+	scrape := func() string {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected /metrics to return 200 OK, got %d", rr.Code)
+		}
+		return rr.Body.String()
+	}
+
+	assertMetricContains := func(desc, expected string) {
+		t.Helper()
+		body := scrape()
+		if !strings.Contains(body, expected) {
+			t.Fatalf("[%s] expected /metrics output to contain %q, got:\n%s", desc, expected, body)
+		}
+	}
+
+	// 1. Initial closed state: state=0, trips=0
+	assertMetricContains("Initial closed state", "gateway_circuit_breaker_state 0")
+	assertMetricContains("Initial trips count", "gateway_circuit_breaker_trips_total 0")
+
+	// 2. 1 failure (below threshold of 2) -> still closed: state=0, trips=0
+	shouldFail = true
+	req1 := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	req1.Header.Set("X-API-Key", testAPIKey)
+	rr1 := httptest.NewRecorder()
+	handler.ServeHTTP(rr1, req1)
+	if rr1.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rr1.Code)
+	}
+
+	assertMetricContains("After 1 failure", "gateway_circuit_breaker_state 0")
+	assertMetricContains("After 1 failure trips", "gateway_circuit_breaker_trips_total 0")
+
+	// 3. 2nd failure (threshold reached) -> transitions to open: state=1, trips=1
+	req2 := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	req2.Header.Set("X-API-Key", testAPIKey)
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rr2.Code)
+	}
+
+	assertMetricContains("After threshold reached (open)", "gateway_circuit_breaker_state 1")
+	assertMetricContains("After first trip", "gateway_circuit_breaker_trips_total 1")
+
+	// 4. Request while open (fast fails with 503) -> still state=1, trips=1
+	req3 := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	req3.Header.Set("X-API-Key", testAPIKey)
+	rr3 := httptest.NewRecorder()
+	handler.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rr3.Code)
+	}
+
+	assertMetricContains("While open after 503", "gateway_circuit_breaker_state 1")
+	assertMetricContains("While open trips remain 1", "gateway_circuit_breaker_trips_total 1")
+
+	// 5. Advance clock past cooldown (10s) -> transitions to half-open: state=2, trips=1
+	clock.Advance(10 * time.Second)
+	assertMetricContains("Cooldown expired (half-open)", "gateway_circuit_breaker_state 2")
+	assertMetricContains("Half-open trips remain 1", "gateway_circuit_breaker_trips_total 1")
+
+	// 6. Trial probe succeeds -> transitions back to closed: state=0, trips=1
+	shouldFail = false
+	probeReq := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	probeReq.Header.Set("X-API-Key", testAPIKey)
+	probeRR := httptest.NewRecorder()
+	handler.ServeHTTP(probeRR, probeReq)
+	if probeRR.Code != http.StatusOK {
+		t.Fatalf("expected probe to return 200, got %d", probeRR.Code)
+	}
+
+	assertMetricContains("Probe succeeded (closed)", "gateway_circuit_breaker_state 0")
+	assertMetricContains("Closed trips remain 1", "gateway_circuit_breaker_trips_total 1")
+
+	// 7. Trip again (2 consecutive failures) -> transitions to open: state=1, trips=2
+	shouldFail = true
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+	}
+
+	assertMetricContains("Re-tripped to open", "gateway_circuit_breaker_state 1")
+	assertMetricContains("Trips counter incremented to 2", "gateway_circuit_breaker_trips_total 2")
+
+	// 8. Cooldown expires and probe fails -> reopens: state=1, trips=3
+	clock.Advance(10 * time.Second)
+	assertMetricContains("Second cooldown expired (half-open)", "gateway_circuit_breaker_state 2")
+
+	// Probe fails
+	probeFailReq := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	probeFailReq.Header.Set("X-API-Key", testAPIKey)
+	probeFailRR := httptest.NewRecorder()
+	handler.ServeHTTP(probeFailRR, probeFailReq)
+	if probeFailRR.Code != http.StatusBadGateway {
+		t.Fatalf("expected failed probe to return 502, got %d", probeFailRR.Code)
+	}
+
+	assertMetricContains("Failed probe reopens circuit", "gateway_circuit_breaker_state 1")
+	assertMetricContains("Trips counter incremented to 3 on failed probe", "gateway_circuit_breaker_trips_total 3")
 }
