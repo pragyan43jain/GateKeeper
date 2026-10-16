@@ -17,7 +17,9 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -159,6 +161,7 @@ type CircuitBreaker struct {
 	openedAt            time.Time
 	halfOpenInFlight    bool
 	clock               func() time.Time
+	name                string
 	metrics             *GatewayMetrics
 }
 
@@ -183,6 +186,45 @@ func NewCircuitBreaker(threshold int, cooldown time.Duration, clock ...func() ti
 	}
 }
 
+// SetName sets the backend identifier for metrics tracking and logging.
+func (cb *CircuitBreaker) SetName(name string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.name = name
+	if cb.metrics != nil && name != "" {
+		if cb.metrics.backendCircuitBreakerState != nil {
+			cb.metrics.backendCircuitBreakerState.WithLabelValues(name).Set(float64(cb.state))
+		}
+		if cb.metrics.backendCircuitBreakerTrips != nil {
+			cb.metrics.backendCircuitBreakerTrips.WithLabelValues(name).Add(0)
+		}
+	}
+}
+
+// Name returns the backend identifier.
+func (cb *CircuitBreaker) Name() string {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.name
+}
+
+// isAvailable returns true if the circuit breaker can accept a request:
+// - Closed: available
+// - Half-Open: available for probe if no probe is currently in flight
+// - Open: available for probe if cooldown has elapsed
+func (cb *CircuitBreaker) isAvailable() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	state := cb.checkStateLocked()
+	if state == StateClosed {
+		return true
+	}
+	if state == StateHalfOpen && !cb.halfOpenInFlight {
+		return true
+	}
+	return false
+}
+
 // SetClock configures a custom clock function (used for deterministic testing).
 func (cb *CircuitBreaker) SetClock(clk func() time.Time) {
 	cb.mu.Lock()
@@ -195,8 +237,18 @@ func (cb *CircuitBreaker) SetMetrics(m *GatewayMetrics) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.metrics = m
-	if m != nil && m.circuitBreakerState != nil {
-		m.circuitBreakerState.Set(float64(cb.state))
+	if m != nil {
+		if m.circuitBreakerState != nil {
+			m.circuitBreakerState.Set(float64(cb.state))
+		}
+		if cb.name != "" {
+			if m.backendCircuitBreakerState != nil {
+				m.backendCircuitBreakerState.WithLabelValues(cb.name).Set(float64(cb.state))
+			}
+			if m.backendCircuitBreakerTrips != nil {
+				m.backendCircuitBreakerTrips.WithLabelValues(cb.name).Add(0)
+			}
+		}
 	}
 }
 
@@ -218,14 +270,25 @@ func (cb *CircuitBreaker) transitionToOpenLocked() {
 		if cb.metrics.circuitBreakerTrips != nil {
 			cb.metrics.circuitBreakerTrips.Inc()
 		}
+		if cb.metrics.backendCircuitBreakerState != nil && cb.name != "" {
+			cb.metrics.backendCircuitBreakerState.WithLabelValues(cb.name).Set(float64(StateOpen))
+		}
+		if cb.metrics.backendCircuitBreakerTrips != nil && cb.name != "" {
+			cb.metrics.backendCircuitBreakerTrips.WithLabelValues(cb.name).Inc()
+		}
 	}
 }
 
 func (cb *CircuitBreaker) transitionToHalfOpenLocked() {
 	cb.state = StateHalfOpen
 	cb.halfOpenInFlight = false
-	if cb.metrics != nil && cb.metrics.circuitBreakerState != nil {
-		cb.metrics.circuitBreakerState.Set(float64(StateHalfOpen))
+	if cb.metrics != nil {
+		if cb.metrics.circuitBreakerState != nil {
+			cb.metrics.circuitBreakerState.Set(float64(StateHalfOpen))
+		}
+		if cb.metrics.backendCircuitBreakerState != nil && cb.name != "" {
+			cb.metrics.backendCircuitBreakerState.WithLabelValues(cb.name).Set(float64(StateHalfOpen))
+		}
 	}
 }
 
@@ -233,8 +296,13 @@ func (cb *CircuitBreaker) transitionToClosedLocked() {
 	cb.state = StateClosed
 	cb.consecutiveFailures = 0
 	cb.halfOpenInFlight = false
-	if cb.metrics != nil && cb.metrics.circuitBreakerState != nil {
-		cb.metrics.circuitBreakerState.Set(float64(StateClosed))
+	if cb.metrics != nil {
+		if cb.metrics.circuitBreakerState != nil {
+			cb.metrics.circuitBreakerState.Set(float64(StateClosed))
+		}
+		if cb.metrics.backendCircuitBreakerState != nil && cb.name != "" {
+			cb.metrics.backendCircuitBreakerState.WithLabelValues(cb.name).Set(float64(StateClosed))
+		}
 	}
 }
 
@@ -402,6 +470,178 @@ func (t *CircuitBreakerTransport) openCircuitResponse(req *http.Request, retryAf
 	}
 }
 
+// BackendNode encapsulates an upstream destination, its dedicated reverse proxy, and its circuit breaker.
+type BackendNode struct {
+	url   *url.URL
+	name  string
+	proxy *httputil.ReverseProxy
+	cb    *CircuitBreaker
+}
+
+// NewBackendNode constructs a new BackendNode with its own ReverseProxy and CircuitBreaker.
+func NewBackendNode(target *url.URL, cb *CircuitBreaker, transport http.RoundTripper) *BackendNode {
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = NewCircuitBreakerTransport(cb, transport)
+
+	name := target.Host
+	if name == "" {
+		name = target.String()
+	}
+	if cb != nil {
+		cb.SetName(name)
+	}
+
+	return &BackendNode{
+		url:   target,
+		name:  name,
+		proxy: proxy,
+		cb:    cb,
+	}
+}
+
+// URL returns the backend target URL.
+func (n *BackendNode) URL() *url.URL {
+	return n.url
+}
+
+// Name returns the backend identifier used for logging and metrics.
+func (n *BackendNode) Name() string {
+	return n.name
+}
+
+// ReverseProxy returns the dedicated reverse proxy for this backend.
+func (n *BackendNode) ReverseProxy() *httputil.ReverseProxy {
+	return n.proxy
+}
+
+// CircuitBreaker returns the dedicated circuit breaker for this backend.
+func (n *BackendNode) CircuitBreaker() *CircuitBreaker {
+	return n.cb
+}
+
+// IsAvailable returns true if the backend's circuit breaker is in a state that permits requests.
+func (n *BackendNode) IsAvailable() bool {
+	if n.cb == nil {
+		return true
+	}
+	return n.cb.isAvailable()
+}
+
+// ConsecutiveFailures returns the consecutive transport failure count of this backend.
+func (n *BackendNode) ConsecutiveFailures() int {
+	if n.cb == nil {
+		return 0
+	}
+	return n.cb.ConsecutiveFailures()
+}
+
+// State returns the circuit breaker state for this backend.
+func (n *BackendNode) State() CircuitState {
+	if n.cb == nil {
+		return StateClosed
+	}
+	return n.cb.State()
+}
+
+func (n *BackendNode) isAvailable() bool {
+	return n.IsAvailable()
+}
+
+// BackendPool provides thread-safe round-robin load balancing across multiple backend nodes.
+type BackendPool struct {
+	nodes []*BackendNode
+	idx   atomic.Uint64
+}
+
+// NewBackendPool initializes a BackendPool with the given slice of BackendNodes.
+func NewBackendPool(nodes []*BackendNode) (*BackendPool, error) {
+	if len(nodes) == 0 {
+		return nil, errors.New("backend pool must contain at least one node")
+	}
+	return &BackendPool{
+		nodes: nodes,
+	}, nil
+}
+
+// Nodes returns all backend nodes in the pool.
+func (p *BackendPool) Nodes() []*BackendNode {
+	return p.nodes
+}
+
+// SelectNode selects a backend node using round-robin distribution, skipping open circuit breakers
+// when healthy alternatives exist. If all backends are unavailable, it selects the scheduled node,
+// which fast-fails with 503 Service Unavailable and Retry-After.
+func (p *BackendPool) SelectNode() *BackendNode {
+	total := len(p.nodes)
+	if total == 1 {
+		return p.nodes[0]
+	}
+
+	start := p.idx.Add(1) - 1
+
+	// Scan for the first available (closed or trial-probe eligible) backend
+	for i := 0; i < total; i++ {
+		candidate := p.nodes[(start+uint64(i))%uint64(total)]
+		if candidate.isAvailable() {
+			return candidate
+		}
+	}
+
+	// All backends are currently open / unavailable.
+	// Route to scheduled round-robin node which will fast-fail with 503 and Retry-After.
+	return p.nodes[start%uint64(total)]
+}
+
+// ServeHTTP delegates request handling to the selected backend node.
+func (p *BackendPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	node := p.SelectNode()
+	node.proxy.ServeHTTP(w, r)
+}
+
+// SetMetrics registers metrics with all circuit breakers in the pool.
+func (p *BackendPool) SetMetrics(m *GatewayMetrics) {
+	for _, node := range p.nodes {
+		if node.cb != nil {
+			node.cb.SetMetrics(m)
+		}
+	}
+}
+
+// UpdateMetrics synchronizes circuit breaker states across all nodes for metrics scraping.
+func (p *BackendPool) UpdateMetrics() {
+	allOpen := true
+	anyHalfOpen := false
+	for _, node := range p.nodes {
+		if node.cb != nil {
+			st := node.cb.State()
+			if st != StateOpen {
+				allOpen = false
+			}
+			if st == StateHalfOpen {
+				anyHalfOpen = true
+			}
+		}
+	}
+	if len(p.nodes) > 0 {
+		var firstCB *CircuitBreaker
+		for _, node := range p.nodes {
+			if node.cb != nil {
+				firstCB = node.cb
+				break
+			}
+		}
+		if firstCB != nil && firstCB.metrics != nil && firstCB.metrics.circuitBreakerState != nil {
+			if allOpen {
+				firstCB.metrics.circuitBreakerState.Set(float64(StateOpen))
+			} else if anyHalfOpen {
+				firstCB.metrics.circuitBreakerState.Set(float64(StateHalfOpen))
+			} else {
+				firstCB.metrics.circuitBreakerState.Set(float64(StateClosed))
+			}
+		}
+	}
+}
+
 // statusResponseWriter captures the response HTTP status code and delegates standard ResponseWriter methods.
 type statusResponseWriter struct {
 	http.ResponseWriter
@@ -445,12 +685,14 @@ func (rw *statusResponseWriter) Unwrap() http.ResponseWriter {
 
 // GatewayMetrics encapsulates Prometheus metrics for Gatekeeper.
 type GatewayMetrics struct {
-	registry            *prometheus.Registry
-	requestsTotal       *prometheus.CounterVec
-	requestDuration     *prometheus.HistogramVec
-	rateLimitRejections prometheus.Counter
-	circuitBreakerState prometheus.Gauge
-	circuitBreakerTrips prometheus.Counter
+	registry                   *prometheus.Registry
+	requestsTotal              *prometheus.CounterVec
+	requestDuration            *prometheus.HistogramVec
+	rateLimitRejections        prometheus.Counter
+	circuitBreakerState        prometheus.Gauge
+	circuitBreakerTrips        prometheus.Counter
+	backendCircuitBreakerState *prometheus.GaugeVec
+	backendCircuitBreakerTrips *prometheus.CounterVec
 }
 
 // NewGatewayMetrics initializes and registers Gatekeeper metrics with the given registry.
@@ -494,10 +736,32 @@ func NewGatewayMetrics(reg *prometheus.Registry) *GatewayMetrics {
 				Help: "Total number of times the circuit breaker has transitioned into the open state.",
 			},
 		),
+		backendCircuitBreakerState: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "gateway_backend_circuit_breaker_state",
+				Help: "Current state of the circuit breaker for a specific backend (0=closed, 1=open, 2=half-open).",
+			},
+			[]string{"backend"},
+		),
+		backendCircuitBreakerTrips: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_backend_circuit_breaker_trips_total",
+				Help: "Total number of times the circuit breaker for a specific backend has transitioned into open state.",
+			},
+			[]string{"backend"},
+		),
 	}
 
 	m.circuitBreakerState.Set(float64(StateClosed))
-	reg.MustRegister(m.requestsTotal, m.requestDuration, m.rateLimitRejections, m.circuitBreakerState, m.circuitBreakerTrips)
+	reg.MustRegister(
+		m.requestsTotal,
+		m.requestDuration,
+		m.rateLimitRejections,
+		m.circuitBreakerState,
+		m.circuitBreakerTrips,
+		m.backendCircuitBreakerState,
+		m.backendCircuitBreakerTrips,
+	)
 	return m
 }
 
@@ -535,8 +799,10 @@ func newGatewayHandler(apiKey string, proxy http.Handler, limiter RateLimiter, m
 		m = NewGatewayMetrics(prometheus.NewRegistry())
 	}
 
-	// Connect circuit breaker to metrics if proxy wraps a CircuitBreakerTransport
-	if rp, ok := proxy.(*httputil.ReverseProxy); ok {
+	// Connect circuit breaker to metrics if proxy wraps a CircuitBreakerTransport or BackendPool
+	if pool, ok := proxy.(*BackendPool); ok {
+		pool.SetMetrics(m)
+	} else if rp, ok := proxy.(*httputil.ReverseProxy); ok {
 		if cbt, ok := rp.Transport.(*CircuitBreakerTransport); ok && cbt.cb != nil {
 			cbt.cb.SetMetrics(m)
 		}
@@ -606,7 +872,9 @@ func newGatewayHandler(apiKey string, proxy http.Handler, limiter RateLimiter, m
 
 	// Dedicated metrics endpoint using Prometheus format. Unauthenticated and sensitive-data free.
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		if rp, ok := proxy.(*httputil.ReverseProxy); ok {
+		if pool, ok := proxy.(*BackendPool); ok {
+			pool.UpdateMetrics()
+		} else if rp, ok := proxy.(*httputil.ReverseProxy); ok {
 			if cbt, ok := rp.Transport.(*CircuitBreakerTransport); ok && cbt.cb != nil {
 				_ = cbt.cb.State()
 			}
@@ -672,6 +940,39 @@ func parseEnvDurationPositive(key string, defaultVal time.Duration) (time.Durati
 	return d, nil
 }
 
+// parseBackendURLs parses comma-separated backend URLs, falling back to fallbackURL if urlsStr is empty.
+func parseBackendURLs(urlsStr, fallbackURL string) ([]*url.URL, error) {
+	targetStr := strings.TrimSpace(urlsStr)
+	if targetStr == "" {
+		targetStr = strings.TrimSpace(fallbackURL)
+	}
+	if targetStr == "" {
+		return nil, errors.New("no backend URL configured")
+	}
+
+	parts := strings.Split(targetStr, ",")
+	var urls []*url.URL
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("invalid backend URL %q: %w", trimmed, err)
+		}
+		if u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("invalid backend URL %q: scheme and host are required", trimmed)
+		}
+		urls = append(urls, u)
+	}
+
+	if len(urls) == 0 {
+		return nil, errors.New("no valid backend URLs provided")
+	}
+	return urls, nil
+}
+
 func main() {
 	// Read the API key from the environment.
 	apiKey := os.Getenv("GATEKEEPER_API_KEY")
@@ -679,11 +980,10 @@ func main() {
 		log.Fatal("GATEKEEPER_API_KEY must be set")
 	}
 
-	// Configure the backend destination.
-	backendURL := getEnv("BACKEND_URL", "http://localhost:8081")
-	target, err := url.Parse(backendURL)
+	// Configure backend destinations (supports comma-separated BACKEND_URLS, falls back to BACKEND_URL).
+	backendURLs, err := parseBackendURLs(os.Getenv("BACKEND_URLS"), getEnv("BACKEND_URL", "http://localhost:8081"))
 	if err != nil {
-		log.Fatalf("invalid backend URL: %v", err)
+		log.Fatalf("backend configuration error: %v", err)
 	}
 
 	// Circuit breaker configuration.
@@ -697,9 +997,17 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
-	cb := NewCircuitBreaker(cbThreshold, cbCooldown)
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = NewCircuitBreakerTransport(cb, http.DefaultTransport)
+	nodes := make([]*BackendNode, 0, len(backendURLs))
+	for _, u := range backendURLs {
+		cb := NewCircuitBreaker(cbThreshold, cbCooldown)
+		node := NewBackendNode(u, cb, http.DefaultTransport)
+		nodes = append(nodes, node)
+	}
+
+	pool, err := NewBackendPool(nodes)
+	if err != nil {
+		log.Fatalf("failed to initialize backend pool: %v", err)
+	}
 
 	// Redis connection settings.
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
@@ -720,9 +1028,9 @@ func main() {
 
 	limiter := NewRedisRateLimiter(rdb, keyPrefix, maxRequests, window)
 	metrics := NewGatewayMetrics(prometheus.NewRegistry())
-	cb.SetMetrics(metrics)
+	pool.SetMetrics(metrics)
 
-	handler := newGatewayHandler(apiKey, proxy, limiter, metrics)
+	handler := newGatewayHandler(apiKey, pool, limiter, metrics)
 
 	port := getEnv("PORT", "8080")
 
@@ -733,7 +1041,11 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("Gatekeeper running at http://localhost:%s (backend: %s, redis: %s, cb_threshold: %d, cb_cooldown: %s)", port, backendURL, redisAddr, cbThreshold, cbCooldown)
+	var backendStrs []string
+	for _, u := range backendURLs {
+		backendStrs = append(backendStrs, u.String())
+	}
+	log.Printf("Gatekeeper running at http://localhost:%s (backends: %v, redis: %s, cb_threshold: %d, cb_cooldown: %s)", port, backendStrs, redisAddr, cbThreshold, cbCooldown)
 
 	serverErr := make(chan error, 1)
 	go func() {
