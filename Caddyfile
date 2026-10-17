@@ -1,0 +1,82 @@
+{
+	email {$ACME_EMAIL:admin@example.com}
+	admin off
+}
+
+# Main Application, Gateway API, and Dashboard
+{$DOMAIN_NAME:localhost} {
+	encode gzip zstd
+
+	# Security Response Headers
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
+	}
+
+	# 1. API Gateway Protected Routes
+	handle /api/* {
+		reverse_proxy gateway:8080 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# 2. Public Gateway Health Check
+	handle /health {
+		reverse_proxy gateway:8080
+	}
+
+	# 3. Gateway Metrics Exposition Endpoint
+	handle /metrics {
+		reverse_proxy gateway:8080
+	}
+
+	# 4. Scoped Prometheus Query Endpoints for Frontend Dashboard
+	# Only allow GET requests on the specific query endpoints required by the telemetry charts
+	@prom_query_allowed {
+		path /prometheus/api/v1/query /prometheus/api/v1/query_range
+		method GET
+	}
+	handle @prom_query_allowed {
+		uri strip_prefix /prometheus
+		reverse_proxy prometheus:9090
+	}
+
+	# Reject unsupported HTTP methods on valid query endpoints with 405 Method Not Allowed
+	@prom_query_method_not_allowed {
+		path /prometheus/api/v1/query /prometheus/api/v1/query_range
+	}
+	handle @prom_query_method_not_allowed {
+		respond "Method Not Allowed" 405
+	}
+
+	# Block all arbitrary Prometheus administrative, config, and diagnostic endpoints
+	handle /prometheus/* {
+		respond "Access Denied" 403
+	}
+
+	# 5. Frontend Single Page Application (Dashboard)
+	handle {
+		reverse_proxy frontend:80
+	}
+}
+
+# Optional: Protected Grafana Subdomain (e.g. grafana.yourdomain.com)
+{$GRAFANA_DOMAIN:grafana.localhost} {
+	encode gzip zstd
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	reverse_proxy grafana:3000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+}

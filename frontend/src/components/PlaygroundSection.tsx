@@ -132,11 +132,11 @@ export const PlaygroundSection: React.FC<PlaygroundSectionProps> = ({
                   </div>
                 ) : normalizedTarget.normalized && normalizedTarget.originalUrl !== normalizedTarget.effectiveUrl ? (
                   <div className="p-1.5 rounded bg-indigo-500/10 border border-indigo-500/20 text-indigo-300">
-                    <span className="font-semibold">Normalized:</span> <span className="line-through text-zinc-500">{normalizedTarget.originalUrl}</span> → <span className="text-emerald-400 font-bold">{normalizedTarget.effectiveUrl}</span> (routed via Vite dev proxy to prevent browser CORS block)
+                    <span className="font-semibold">Normalized:</span> <span className="line-through text-zinc-500">{normalizedTarget.originalUrl}</span> → <span className="text-emerald-400 font-bold">{normalizedTarget.effectiveUrl}</span> (routed via gateway reverse proxy to prevent browser CORS block)
                   </div>
                 ) : (
                   <div className="text-zinc-500 text-[10px]">
-                    Proxy route: Vite proxy forwards <code className="text-zinc-400">{normalizedTarget.effectiveUrl}</code> → <code className="text-zinc-400">http://localhost:8082{normalizedTarget.effectiveUrl}</code>
+                    Proxy route: Reverse proxy forwards <code className="text-zinc-400">{normalizedTarget.effectiveUrl}</code> → <code className="text-zinc-400">gateway:8080{normalizedTarget.effectiveUrl}</code>
                   </div>
                 )}
               </div>

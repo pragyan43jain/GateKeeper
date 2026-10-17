@@ -1,0 +1,19 @@
+# GateKeeper Development Docker Compose Override
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Binds service debug ports strictly to the host loopback interface (127.0.0.1)
+# for direct local inspection and debugging. NEVER use this file on a public server.
+
+services:
+  gateway:
+    ports:
+      - "127.0.0.1:8082:8080"
+
+  prometheus:
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    ports:
+      - "127.0.0.1:3000:3000"

@@ -1,16 +1,79 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME:-localhost}
+      - GRAFANA_DOMAIN=${GRAFANA_DOMAIN:-grafana.localhost}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 2s
+    logging: *default-logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    logging: *default-logging
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    command: >
+      sh -c '
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+        else
+          exec redis-server --appendonly yes
+        fi
+      '
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: >
+        sh -c '
+          if [ -n "$$REDIS_PASSWORD" ]; then
+            redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping | grep -q PONG
+          else
+            redis-cli ping | grep -q PONG
+          fi
+        '
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 2s
+    logging: *default-logging
 
   backend-1:
     build:
@@ -34,6 +97,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 2s
+    logging: *default-logging
 
   backend-2:
     build:
@@ -57,14 +121,13 @@ services:
       timeout: 3s
       retries: 5
       start_period: 2s
+    logging: *default-logging
 
   gateway:
     build:
       context: .
       dockerfile: gateway/Dockerfile
     restart: unless-stopped
-    ports:
-      - "8082:8080"
     environment:
       - BACKEND_URLS=http://backend-1:8081,http://backend-2:8081
       - BACKEND_URL=http://backend-1:8081
@@ -96,6 +159,7 @@ services:
       timeout: 3s
       retries: 5
       start_period: 3s
+    logging: *default-logging
 
   prometheus:
     image: prom/prometheus:latest
@@ -108,8 +172,6 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    ports:
-      - "9090:9090"
     depends_on:
       gateway:
         condition: service_healthy
@@ -128,19 +190,18 @@ services:
       timeout: 3s
       retries: 5
       start_period: 3s
+    logging: *default-logging
 
   grafana:
     image: grafana/grafana:latest
     restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - grafana-data:/var/lib/grafana
-    ports:
-      - "3000:3000"
     depends_on:
       prometheus:
         condition: service_healthy
@@ -159,8 +220,11 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    logging: *default-logging
 
 volumes:
   redis-data:
   prometheus-data:
   grafana-data:
+  caddy-data:
+  caddy-config:

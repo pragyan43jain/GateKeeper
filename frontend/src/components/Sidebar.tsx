@@ -109,8 +109,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, onSelectTab, healt
       {/* Footer stats */}
       <div className="p-3 border-t border-zinc-800 text-[11px] text-zinc-400 space-y-1 font-mono">
         <div className="flex justify-between">
-          <span>PORT</span>
-          <span className="text-zinc-300">8082 : 8080</span>
+          <span>GATEWAY</span>
+          <span className="text-zinc-300">:8080 (Ingress)</span>
         </div>
         <div className="flex justify-between">
           <span>TARGETS</span>

@@ -1,6 +1,6 @@
 # GateKeeper
 
-GateKeeper is a lightweight, high-performance API Gateway written in Go. It provides API-key authentication, atomic Redis-backed rate limiting, reverse proxying, Prometheus metrics instrumentation, and pre-configured Grafana monitoring—packaged for turnkey deployment using Docker Compose.
+GateKeeper is a lightweight, high-performance API Gateway written in Go. It provides API-key authentication, atomic Redis-backed sliding-window rate limiting, round-robin load balancing with independent per-backend circuit breakers, reverse proxying, Prometheus metrics instrumentation, a modern React developer dashboard, and automated TLS termination via Caddy—packaged for turnkey deployment using Docker Compose.
 
 ---
 
@@ -8,22 +8,36 @@ GateKeeper is a lightweight, high-performance API Gateway written in Go. It prov
 
 ```mermaid
 flowchart TD
-    Client["Client / Application"]
+    Client["Client / Browser / Application"]
 
-    subgraph Host ["Host Machine (Ports 8082, 9090, 3000)"]
-        subgraph DockerCompose ["Docker Compose Network (gatekeeper_default)"]
-            Gateway["Gatekeeper Gateway (:8080)<br/>Host Port: 8082"]
-            Backend["Backend Service (:8081)<br/>Internal Only"]
-            Redis[("Redis (:6379)<br/>Internal Only")]
-            Prometheus["Prometheus (:9090)<br/>Host Port: 9090"]
-            Grafana["Grafana (:3000)<br/>Host Port: 3000"]
+    subgraph Host ["Linux VPS / Host Machine (Ports 80 & 443)"]
+        subgraph Edge ["Edge Reverse Proxy & Auto-TLS"]
+            Caddy["Caddy Server (:80, :443)<br/>Automated Let's Encrypt TLS"]
+        end
+
+        subgraph DockerCompose ["Internal Docker Network (gatekeeper_default)"]
+            Frontend["Frontend Dashboard (:80)<br/>React + TS + Vite SPA"]
+            Gateway["GateKeeper Gateway (:8080)<br/>Internal Only"]
+            Backend1["Backend Instance 1 (:8081)<br/>Internal Only"]
+            Backend2["Backend Instance 2 (:8081)<br/>Internal Only"]
+            Redis[("Redis 7 (:6379)<br/>Auth Required | Internal Only")]
+            Prometheus["Prometheus (:9090)<br/>Internal Only"]
+            Grafana["Grafana (:3000)<br/>Internal Only"]
         end
     end
 
-    Client -->|"HTTP Requests (:8082)"| Gateway
-    Gateway -->|"1. Validate X-API-Key"| Gateway
-    Gateway -->|"2. Atomic Lua Token Check"| Redis
-    Gateway -->|"3. Reverse Proxy (if allowed)"| Backend
+    Client -->|"HTTPS (443) / HTTP (80)"| Caddy
+    Caddy -->|"1. Static Assets (/*)"| Frontend
+    Caddy -->|"2. API Requests (/api/*)"| Gateway
+    Caddy -->|"3. Health (/health) & Metrics (/metrics)"| Gateway
+    Caddy -->|"4. Scoped Telemetry (/prometheus/api/v1/query*)"| Prometheus
+    Caddy -.->|"5. Optional Subdomain"| Grafana
+
+    Gateway -->|"Verify X-API-Key"| Gateway
+    Gateway -->|"Atomic Lua Rate Check"| Redis
+    Gateway -->|"Round-Robin & Circuit Breaker"| Backend1
+    Gateway -->|"Round-Robin & Circuit Breaker"| Backend2
+
     Prometheus -->|"Scrape /metrics (every 5s)"| Gateway
     Grafana -->|"Query PromQL via Provisioned Datasource"| Prometheus
 
@@ -31,6 +45,8 @@ flowchart TD
         RedisVol[("redis-data")] --- Redis
         PromVol[("prometheus-data")] --- Prometheus
         GrafVol[("grafana-data")] --- Grafana
+        CaddyData[("caddy-data")] --- Caddy
+        CaddyConfig[("caddy-config")] --- Caddy
     end
 ```
 
@@ -38,15 +54,16 @@ flowchart TD
 
 ## Features
 
+- **Automated HTTPS & Edge Routing**: Caddy edge reverse proxy with automatic Let's Encrypt TLS certificate provisioning, HTTP-to-HTTPS redirection, and modern HTTP/2 + HTTP/3 support.
 - **API-Key Authentication**: Constant-time verification (`subtle.ConstantTimeCompare`) of the `X-API-Key` header on all `/api/*` routes.
-- **Atomic Redis Rate Limiting**: Fixed-window rate limiting (10 requests per 60s window by default) powered by a single-threaded Redis Lua script to prevent concurrency race conditions.
-- **Credential Privacy**: Derives a deterministic SHA-256 hash from incoming API keys. Raw keys are never stored in Redis or written to logs.
+- **Atomic Redis Rate Limiting**: Fixed/sliding-window rate limiting powered by a single-threaded Redis Lua script to prevent concurrency race conditions. Supports password-authenticated Redis connections.
+- **Round-Robin Load Balancing**: Thread-safe round-robin routing across multiple upstream backend instances (`backend-1`, `backend-2`).
+- **Independent Circuit Breakers**: Dedicated per-backend circuit breakers with isolated failure thresholds, cooldown intervals, and half-open trial probes. Automatically skips failing backends and fast-fails with `503 Service Unavailable` and `Retry-After` if all backends are down.
+- **Credential Privacy**: Derives a deterministic SHA-256 hash from incoming API keys. Raw keys are never stored in Redis, printed to logs, or exposed.
 - **Fail-Safe Design**: Returns `HTTP 503 Service Unavailable` if Redis is unreachable—never silently bypassing rate limits.
-- **Standard HTTP Rate Limit Headers**: Emits `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and standard `Retry-After` headers on `HTTP 429 Too Many Requests`.
-- **Prometheus Metrics**: Exposes `gateway_requests_total`, `gateway_request_duration_seconds` (histogram), and `gateway_rate_limit_rejections_total` on `/metrics`.
-- **Automated Grafana Provisioning**: Automatically registers Prometheus as the default data source on startup.
-- **Container Hardening**: Multi-stage Docker builds based on `golang:alpine` and `alpine:latest` running under non-root users (`appuser`).
-- **Internal Service Isolation**: Backend and Redis containers are strictly private to the Compose network; only Gateway, Prometheus, and Grafana expose host ports.
+- **Interactive Monitoring Dashboard**: React + TypeScript + Vite single-page application served via a multi-stage Caddy container, featuring real-time telemetry, backend circuit breaker states, and an interactive API playground.
+- **Scoped Telemetry Ingress**: Prometheus query access through the edge proxy is strictly restricted to query endpoints (`/prometheus/api/v1/query` and `/query_range`) used by the dashboard. Administrative and destructive Prometheus endpoints are blocked with `403 Forbidden`.
+- **Internal Service Isolation**: Upstream backends, Redis, Prometheus, Grafana, and the gateway do not publish ports to the public host interface. All public traffic must enter through Caddy on ports 80 and 443.
 
 ---
 
@@ -54,287 +71,275 @@ flowchart TD
 
 | Layer | Component | Description |
 |---|---|---|
-| **Language** | Go 1.26 | Standard library `net/http` and `net/http/httputil` |
-| **Data Store / Cache** | Redis 7 (`redis:7-alpine`) | In-memory token counter with AOF persistence |
-| **Redis Client** | `github.com/redis/go-redis/v9` | Go Redis client with Lua script execution |
-| **Metrics** | `github.com/prometheus/client_golang` | Prometheus Go metrics collector & exposition |
-| **Monitoring** | Prometheus (`prom/prometheus:latest`) | Time-series metrics collection & scraping |
-| **Visualization** | Grafana (`grafana/grafana:latest`) | Analytics dashboards & metric exploration |
-| **Containerization** | Docker & Docker Compose v2 | Multi-container orchestrated deployment |
+| **Edge Proxy** | Caddy 2.8 (`caddy:2.8-alpine`) | Automated TLS, reverse proxy, compression, and static asset serving |
+| **API Gateway** | Go 1.26 | Standard library `net/http`, reverse proxy, load balancer, circuit breakers |
+| **Dashboard** | React 19 + TypeScript + Vite + Tailwind | Modern real-time gateway developer dashboard |
+| **Cache / Token Store** | Redis 7 (`redis:7-alpine`) | In-memory token counter with AOF persistence and password auth |
+| **Metrics Collection** | Prometheus (`prom/prometheus:latest`) | Time-series metrics collection and scraping |
+| **Visualization** | Grafana (`grafana/grafana:latest`) | Analytics dashboard provisioned with Prometheus data source |
+| **Containerization** | Docker & Docker Compose v2 | Multi-container orchestrated deployment with logging limits |
 
 ---
 
-## Prerequisites
+## Production Deployment Guide (Single Linux VPS)
 
-- **Docker Engine** (20.10+) and **Docker Compose** (v2.0+)
-- *(Optional for local Go development)*: **Go 1.26+** and a running local **Redis** instance (`redis-cli ping` returns `PONG`).
+This guide walks through deploying GateKeeper to a single Linux Virtual Private Server (Ubuntu 22.04 LTS or Debian 12 recommended).
 
----
+### 1. Prerequisites
 
-## Environment Variables
+1. **Linux VPS**: A cloud VPS (e.g. Hetzner, DigitalOcean, Linode, AWS EC2) with at least 1 GB RAM and 1 vCPU.
+2. **DNS Records**: Configure your domain's DNS `A` (and optional `AAAA`) records to point to your VPS public IP:
+   * `gatekeeper.yourdomain.com` $\rightarrow$ `<VPS-PUBLIC-IP>`
+   * `grafana.yourdomain.com` (optional) $\rightarrow$ `<VPS-PUBLIC-IP>`
+3. **Docker Engine & Compose**:
+   ```bash
+   # Install Docker using the official convenience script
+   curl -fsSL https://get.docker.com | sh
+   sudo usermod -aG docker $USER
+   # Log out and log back in to apply group changes
+   ```
 
-Copy the provided example environment template:
+### 2. Firewall Configuration (UFW)
+
+Ensure only SSH (22), HTTP (80), and HTTPS (443) are publicly reachable. Internal services (`8080`, `8081`, `6379`, `9090`, `3000`) must be blocked from WAN:
 
 ```bash
+# Enable UFW firewall
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp comment 'SSH'
+sudo ufw allow 80/tcp comment 'Caddy HTTP'
+sudo ufw allow 443/tcp comment 'Caddy HTTPS'
+sudo ufw enable
+sudo ufw status verbose
+```
+
+### 3. Clone Repository & Setup Environment
+
+```bash
+# Clone the repository
+git clone https://github.com/pragyan43jain/GateKeeper.git
+cd GateKeeper
+
+# Copy the production environment template
 cp .env.example .env
 ```
 
-### Configuration Keys
-
-| Variable | Default Value | Description |
-|---|---|---|
-| `GATEKEEPER_API_KEY` | *(Required, e.g. `dev-secret-change-me`)* | Master secret API key required by incoming `/api/*` requests. |
-| `REDIS_ADDR` | `redis:6379` (Docker) / `localhost:6379` (Local) | Redis hostname and port. |
-| `REDIS_PASSWORD` | `""` | Optional password for Redis authentication. |
-| `REDIS_DB` | `0` | Redis logical database index. |
-| `REDIS_KEY_PREFIX` | `gatekeeper:rate_limit:` | Prefix applied to Redis rate-limit counter keys. |
-| `BACKEND_URL` | `http://backend:8081` (Docker) / `http://localhost:8081` (Local) | Upstream destination URL for reverse proxying. |
-| `PORT` | `8080` | Port the Gateway HTTP server listens on inside its container/environment. |
-| `RATE_LIMIT_MAX_REQUESTS` | `10` | Maximum requests permitted per window per API key. |
-| `RATE_LIMIT_WINDOW` | `60s` | Time window duration for rate limits (Go duration format). |
-
-> [!NOTE]
-> `.env` is listed in `.gitignore` and `.dockerignore` to ensure local secrets are never committed to version control or baked into image layers.
-
----
-
-## Running with Docker Compose
-
-### 1. Build and Start All Services
+Generate cryptographically secure secrets and fill in `.env`:
 
 ```bash
-# Start all 5 services in detached mode
+# Generate secrets
+API_KEY=$(openssl rand -hex 24)
+REDIS_PW=$(openssl rand -hex 24)
+GRAFANA_PW=$(openssl rand -hex 24)
+
+# Populate .env
+sed -i "s/your-secure-gateway-api-key-here/$API_KEY/" .env
+sed -i "s/your-secure-redis-password-here/$REDIS_PW/" .env
+sed -i "s/your-secure-grafana-password-here/$GRAFANA_PW/" .env
+sed -i "s/DOMAIN_NAME=localhost/DOMAIN_NAME=gatekeeper.yourdomain.com/" .env
+sed -i "s/ACME_EMAIL=admin@example.com/ACME_EMAIL=your-email@yourdomain.com/" .env
+sed -i "s/GRAFANA_DOMAIN=grafana.localhost/GRAFANA_DOMAIN=grafana.yourdomain.com/" .env
+```
+
+Verify your `.env` contains valid values (do not share or commit this file):
+```bash
+grep -E '^(DOMAIN_NAME|ACME_EMAIL|GATEKEEPER_API_KEY|REDIS_PASSWORD|GRAFANA_ADMIN_PASSWORD)=' .env
+```
+
+### 4. Build and Start Services
+
+```bash
+# Build multi-stage images and start in detached mode
 docker compose up -d --build
 ```
 
-### 2. Verify Service Health
+### 5. Verification & Health Check
 
+1. **Verify Container Health**:
+   ```bash
+   docker compose ps
+   ```
+   All 7 containers (`caddy`, `frontend`, `gateway`, `backend-1`, `backend-2`, `redis`, `prometheus`, `grafana`) should show status `Up (healthy)`.
+
+2. **Verify Public Health Endpoint (over HTTPS)**:
+   ```bash
+   curl -i https://gatekeeper.yourdomain.com/health
+   # Expected: HTTP/2 200 OK with body "Gatekeeper is healthy"
+   ```
+
+3. **Verify Authenticated API Route & Load Balancing**:
+   ```bash
+   # Read your API key from .env
+   KEY=$(grep GATEKEEPER_API_KEY .env | cut -d '=' -f2)
+
+   # Send requests to observe round-robin alternation across backends
+   curl -i -H "X-API-Key: $KEY" https://gatekeeper.yourdomain.com/api/students
+   curl -i -H "X-API-Key: $KEY" https://gatekeeper.yourdomain.com/api/students
+   # Check response headers: X-Backend-Id should alternate between backend-1 and backend-2
+   ```
+
+4. **Verify Unauthorized Requests**:
+   ```bash
+   curl -i https://gatekeeper.yourdomain.com/api/students
+   # Expected: HTTP/2 401 Unauthorized
+   ```
+
+5. **Verify Rate Limiting**:
+   Send 11 rapid requests with your API key to observe the sliding-window limit:
+   ```bash
+   for i in {1..11}; do
+     curl -s -o /dev/null -w "%{http_code}\n" -H "X-API-Key: $KEY" https://gatekeeper.yourdomain.com/api/students
+   done
+   # Expected: First 10 return 200, 11th returns 429 Too Many Requests with Retry-After header
+   ```
+
+6. **Verify Scoped Prometheus Protection & Method Restrictions**:
+   ```bash
+   # Permitted GET queries (returns HTTP/2 200 OK)
+   curl -i https://gatekeeper.yourdomain.com/prometheus/api/v1/query?query=up
+   curl -i "https://gatekeeper.yourdomain.com/prometheus/api/v1/query_range?query=up&start=$(($(date +%s)-60))&end=$(date +%s)&step=15s"
+
+   # Disallowed HTTP method on query route (returns HTTP/2 405 Method Not Allowed)
+   curl -i -X POST https://gatekeeper.yourdomain.com/prometheus/api/v1/query
+   curl -i -X DELETE https://gatekeeper.yourdomain.com/prometheus/api/v1/query
+
+   # Blocked administrative/diagnostic endpoints (returns HTTP/2 403 Forbidden)
+   curl -i https://gatekeeper.yourdomain.com/prometheus/api/v1/admin/tsdb/clean_tombstones
+   curl -i -X POST https://gatekeeper.yourdomain.com/prometheus/-/quit
+   ```
+
+7. **Verify Browser Security Headers**:
+   ```bash
+   curl -I https://gatekeeper.yourdomain.com/
+   # Expected headers:
+   # Strict-Transport-Security: max-age=31536000
+   # X-Content-Type-Options: nosniff
+   # X-Frame-Options: DENY
+   # Referrer-Policy: strict-origin-when-cross-origin
+   # Permissions-Policy: camera=(), microphone=(), geolocation=()
+   # Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ...
+   ```
+
+---
+
+## Security Architecture & Hardening
+
+### 1. Ingress & Browser Security Headers
+The public Caddy reverse proxy terminates TLS and injects standardized browser defense-in-depth headers on all external responses:
+- `Strict-Transport-Security`: Enforces HTTPS for all client sessions.
+- `X-Content-Type-Options: nosniff`: Prevents MIME-type confusion attacks.
+- `X-Frame-Options: DENY`: Prevents clickjacking and framing.
+- `Referrer-Policy: strict-origin-when-cross-origin`: Minimizes referrer leakage.
+- `Permissions-Policy`: Restricts browser sensors (camera, microphone, geolocation).
+- `Content-Security-Policy`: Scoped to safely permit React + Vite scripts, dynamic SVG and styling used by Recharts (`'unsafe-inline'`), and outgoing API Playground requests (`connect-src 'self' https: http:`) while blocking rogue script/plugin execution.
+
+### 2. Scoped Telemetry Ingress
+- Only HTTP `GET` requests to `/prometheus/api/v1/query` and `/prometheus/api/v1/query_range` are forwarded to Prometheus for dashboard charts.
+- Non-GET methods (POST, PUT, DELETE) on query endpoints are rejected at the edge with `HTTP 405 Method Not Allowed`.
+- All other paths (`/graph`, `/api/v1/admin/*`, `/-/quit`, `/-/reload`) are rejected with `HTTP 403 Forbidden` (`Access Denied`).
+
+### 3. Grafana Production Requirements
+- **Credentials**:
+  - `GRAFANA_ADMIN_USER`: Defaults to `admin`.
+  - `GRAFANA_ADMIN_PASSWORD`: **Mandatory** in production `.env`. Must be set to a cryptographically random string (e.g. `openssl rand -hex 24`). Default fallbacks have been removed from Compose. If unset, Grafana starts with a blank password and standard logins are refused.
+  - Public registration is permanently disabled (`GF_USERS_ALLOW_SIGN_UP=false`).
+- **DNS Requirements**:
+  - `GRAFANA_DOMAIN` (e.g. `grafana.yourdomain.com`) requires its own dedicated DNS `A` record pointing to the VPS public IP.
+  - If the DNS record is missing, Caddy's ACME certificate challenge for the Grafana subdomain will fail.
+- **Access Control**:
+  - Direct host port 3000 is not exposed to the WAN.
+  - If Grafana should not be public at all, operators can omit `GRAFANA_DOMAIN` from public DNS and access Grafana securely via an SSH tunnel:
+    ```bash
+    ssh -L 3000:localhost:3000 user@vps-ip
+    ```
+
+---
+
+## Maintenance, Logs & Rollback
+
+### Viewing Logs
 ```bash
-docker compose ps
-```
-
-Expected healthy output:
-```text
-NAME                      IMAGE                STATUS                    PORTS
-gatekeeper-backend-1      gatekeeper-backend   Up (healthy)              8081/tcp
-gatekeeper-gateway-1      gatekeeper-gateway   Up (healthy)              0.0.0.0:8082->8080/tcp
-gatekeeper-redis-1        redis:7-alpine       Up (healthy)              6379/tcp
-gatekeeper-prometheus-1   prom/prometheus      Up (healthy)              0.0.0.0:9090->9090/tcp
-gatekeeper-grafana-1      grafana/grafana      Up (healthy)              0.0.0.0:3000->3000/tcp
-```
-
-### 3. View Logs
-
-```bash
-# Follow logs across all containers
+# Tail all container logs
 docker compose logs -f
 
-# Follow gateway logs only
+# Tail Caddy access & TLS logs
+docker compose logs -f caddy
+
+# Tail Gateway proxy & circuit breaker logs
 docker compose logs -f gateway
 ```
 
-### 4. Stop Services
-
+### Applying Configuration Updates
 ```bash
-# Stop containers (preserves volume data)
+# Restart Caddy after Caddyfile edits
+docker compose restart caddy
+
+# Rebuild and restart after code changes
+git pull origin main
+docker compose up -d --build
+```
+
+### Rollback Procedure
+If a deployment exhibits regressions:
+```bash
+# 1. Stop the current deployment
 docker compose down
 
-# Stop containers and remove persistent volumes
-docker compose down -v
+# 2. Checkout the known stable commit or tag
+git checkout <stable-commit-hash>
+
+# 3. Rebuild and restart
+docker compose up -d --build
 ```
 
----
-
-## API Usage & Endpoints
-
-### 1. Public Health Check
-The `/health` endpoint is unauthenticated and independent of Redis:
-
+### Stopping Services & Data Preservation
 ```bash
-curl -i http://localhost:8082/health
-```
+# Stop containers (preserves all volume data)
+docker compose down
 
-**Response**:
-```http
-HTTP/1.1 200 OK
-Content-Type: text/plain
-
-Gatekeeper is healthy
+# Warning: The following command destroys rate limit history and Prometheus metrics:
+# docker compose down -v
 ```
 
 ---
 
-### 2. Authenticated API Request (Forwarded to Backend)
-Include the configured API key in the `X-API-Key` header:
+## Local Development Workflows
 
+### Workflow A: Local Ingress Development (Recommended)
+You can run the full containerized stack locally without touching raw host ports:
 ```bash
-curl -i -H "X-API-Key: dev-secret-change-me" http://localhost:8082/api/students
+# 1. Start the stack (Caddy listens on localhost:80 and localhost:443)
+docker compose up -d --build
+
+# 2. Start the Vite dev server for hot-reload frontend development
+cd frontend
+npm install
+npm run dev
+# The Vite dev proxy automatically routes /api, /health, /metrics, and /prometheus
+# to https://localhost (Caddy) without needing raw gateway/prometheus ports.
 ```
 
-**Response**:
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-X-Gateway: Gatekeeper
-X-Ratelimit-Limit: 10
-X-Ratelimit-Remaining: 9
-
-{"message":"Hello from backend","students":["Arjun","Priya","Rahul"]}
-```
-
----
-
-### 3. Unauthorized Requests (Missing or Invalid Key)
-
+### Workflow B: Direct Loopback Debugging (`docker-compose.dev.yml`)
+If you require direct access to internal container ports for debugging, use the development override which binds ports strictly to `127.0.0.1` (never `0.0.0.0`):
 ```bash
-# Missing header
-curl -i http://localhost:8082/api/students
+# Start with the development override
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 
-# Invalid key
-curl -i -H "X-API-Key: wrong-key" http://localhost:8082/api/students
+# Direct loopback endpoints available:
+# - Gateway:    http://127.0.0.1:8082
+# - Prometheus: http://127.0.0.1:9090
+# - Grafana:    http://127.0.0.1:3000
+
+# Run frontend against raw gateway port:
+cd frontend
+VITE_PROXY_TARGET=http://localhost:8082 npm run dev
 ```
 
-**Response**:
-```http
-HTTP/1.1 401 Unauthorized
-Content-Type: text/plain; charset=utf-8
-
-Unauthorized
-```
-
----
-
-### 4. Rate Limiting in Action (Exceeding Quota)
-Send 11 rapid requests with a valid key:
-
+### Running Backend Tests
 ```bash
-for i in {1..11}; do
-  curl -s -o /dev/null -w "Request $i: HTTP %{http_code}\n" -H "X-API-Key: dev-secret-change-me" http://localhost:8082/api/students
-done
+go test -v -count=1 ./...
+go test -race -v -count=1 ./...
+go vet ./...
 ```
-
-**Expected 11th Request Response**:
-```http
-HTTP/1.1 429 Too Many Requests
-Content-Type: text/plain; charset=utf-8
-Retry-After: 58
-
-Too Many Requests: rate limit exceeded. Retry after 58 seconds
-```
-
----
-
-## Monitoring & Dashboards
-
-### Web Interfaces
-
-| Service | URL | Credentials | Purpose |
-|---|---|---|---|
-| **Gatekeeper API** | [http://localhost:8082](http://localhost:8082) | `X-API-Key: dev-secret-change-me` | Reverse proxy & API traffic |
-| **Prometheus Metrics** | [http://localhost:8082/metrics](http://localhost:8082/metrics) | *None (Public)* | Raw Prometheus text exposition |
-| **Prometheus Web UI** | [http://localhost:9090](http://localhost:9090) | *None* | Metric exploration, PromQL queries, targets status |
-| **Grafana UI** | [http://localhost:3000](http://localhost:3000) | `admin` / `admin` | Dashboards (Prometheus pre-configured) |
-
----
-
-### Tracked Metrics
-
-| Metric Name | Type | Labels | Description |
-|---|---|---|---|
-| `gateway_requests_total` | Counter | `code`, `method` | Total application HTTP requests processed by Gatekeeper. |
-| `gateway_request_duration_seconds` | Histogram | `code`, `method` | Latency distribution of requests in seconds across standard buckets. |
-| `gateway_rate_limit_rejections_total` | Counter | *None* | Total requests rejected with HTTP 429. |
-
-> [!NOTE]
-> Scrapes against `/metrics` are deliberately excluded from `gateway_requests_total` and latency tracking to prevent metrics scraper distortion.
-
----
-
-### Example PromQL Queries
-
-Paste these queries into the **Prometheus Graph UI** (`http://localhost:9090/graph`) or **Grafana Explore** (`http://localhost:3000/explore`):
-
-- **Request Rate by HTTP Status Code (req/sec)**:
-  ```promql
-  sum by (code) (rate(gateway_requests_total[1m]))
-  ```
-
-- **Rate-Limited Rejection Rate (req/sec)**:
-  ```promql
-  rate(gateway_rate_limit_rejections_total[1m])
-  ```
-
-- **95th Percentile Latency (p95)**:
-  ```promql
-  histogram_quantile(0.95, sum by (le) (rate(gateway_request_duration_seconds_bucket[5m])))
-  ```
-
-- **Average Request Latency (seconds)**:
-  ```promql
-  rate(gateway_request_duration_seconds_sum[1m]) / rate(gateway_request_duration_seconds_count[1m])
-  ```
-
-- **Target Scrape Health**:
-  ```promql
-  up{job="gatekeeper"}
-  ```
-
----
-
-## Running Go Tests Locally
-
-Ensure local Redis is running on `localhost:6379` before running tests (the test suite uses an isolated `gatekeeper:test:*` keyspace and automatically cleans up keys upon completion).
-
-```bash
-# Run unit and integration tests
-go test -v ./...
-
-# Run tests with the Go race detector
-go test -race -v ./...
-
-# Run code formatting check
-gofmt -s -w .
-```
-
----
-
-## Security & Privacy Considerations
-
-1. **SHA-256 API Key Hashing**:
-   Gatekeeper hashes incoming API keys with `crypto/sha256` before interacting with Redis or emitting log lines. The raw API key is never written to Redis keys, TTL records, or server logs.
-2. **Fail-Safe 503 Policy**:
-   If Redis becomes unreachable or connection timeouts occur, Gatekeeper logs an error and returns `HTTP 503 Service Unavailable`. It refuses to fail open, preventing uncontrolled traffic spikes against upstream backends during cache outages.
-3. **Private Backend & Cache**:
-   In `docker-compose.yml`, neither `backend` (8081) nor `redis` (6379) expose ports to the host machine. They communicate exclusively over the internal Docker bridge network.
-4. **Non-Root Container Execution**:
-   Dockerfiles declare an explicit unprivileged user (`USER appuser`) so gateway and backend processes run without root privileges inside containers.
-
----
-
-## Troubleshooting
-
-### 1. Port Already in Use (e.g. 8082, 9090, 3000)
-If Docker fails to bind a host port:
-```bash
-# Identify process holding the port
-lsof -i :8082 -i :9090 -i :3000
-
-# Stop any conflicting background processes or modify the host port in docker-compose.yml
-```
-
-### 2. Backend Health Check Failures
-The backend health check requires fetching `/api/students` using `wget -q --tries=1 -O /dev/null http://127.0.0.1:8081/api/students`. Avoid using `wget --spider` because the backend restricts non-GET methods and BusyBox `--spider` sends `HEAD` requests, causing an `HTTP 405 Method Not Allowed` exit code 8 failure.
-
-### 3. Prometheus Target Shows DOWN
-- Verify the Gateway container is healthy: `docker compose ps gateway`.
-- Check that Gateway metrics are accessible internally:
-  ```bash
-  docker compose exec prometheus wget -q -O - http://gateway:8080/metrics
-  ```
-- Ensure `prometheus/prometheus.yml` lists target `gateway:8080`.
-
-### 4. Redis Connection Error (503 Service Unavailable)
-- Check Redis container status: `docker compose ps redis`.
-- Inspect logs for connection refused: `docker compose logs redis`.
-- Ensure `REDIS_ADDR` is set to `redis:6379` when running inside Docker Compose.
 
