@@ -14,14 +14,18 @@ func newBackendHandler(backendID string) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/students", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Backend-Id", backendID)
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"backend_id": backendID,
 			"message":    "Hello from backend",

@@ -59,6 +59,7 @@ flowchart TD
 - **Atomic Redis Rate Limiting**: Fixed/sliding-window rate limiting powered by a single-threaded Redis Lua script to prevent concurrency race conditions. Supports password-authenticated Redis connections.
 - **Round-Robin Load Balancing**: Thread-safe round-robin routing across multiple upstream backend instances (`backend-1`, `backend-2`).
 - **Independent Circuit Breakers**: Dedicated per-backend circuit breakers with isolated failure thresholds, cooldown intervals, and half-open trial probes. Automatically skips failing backends and fast-fails with `503 Service Unavailable` and `Retry-After` if all backends are down.
+- **Configurable Upstream Timeouts**: Gateway enforces bounded upstream `ResponseHeaderTimeout` (`BACKEND_TIMEOUT`, default: 10s). Slow or deadlocked backends are terminated with `502 Bad Gateway` and counted toward circuit breaker failure thresholds rather than hanging client connections indefinitely.
 - **Credential Privacy**: Derives a deterministic SHA-256 hash from incoming API keys. Raw keys are never stored in Redis, printed to logs, or exposed.
 - **Fail-Safe Design**: Returns `HTTP 503 Service Unavailable` if Redis is unreachable—never silently bypassing rate limits.
 - **Interactive Monitoring Dashboard**: React + TypeScript + Vite single-page application served via a multi-stage Caddy container, featuring real-time telemetry, backend circuit breaker states, and an interactive API playground.
@@ -232,7 +233,7 @@ The public Caddy reverse proxy terminates TLS and injects standardized browser d
 - `X-Frame-Options: DENY`: Prevents clickjacking and framing.
 - `Referrer-Policy: strict-origin-when-cross-origin`: Minimizes referrer leakage.
 - `Permissions-Policy`: Restricts browser sensors (camera, microphone, geolocation).
-- `Content-Security-Policy`: Scoped to safely permit React + Vite scripts, dynamic SVG and styling used by Recharts (`'unsafe-inline'`), and outgoing API Playground requests (`connect-src 'self' https: http:`) while blocking rogue script/plugin execution.
+- `Content-Security-Policy`: Scoped to safely permit React + Vite scripts, dynamic SVG and styling used by Recharts (`'unsafe-inline'`), and outgoing API requests restricted strictly to same-origin (`connect-src 'self'`) while blocking rogue script/plugin execution.
 
 ### 2. Scoped Telemetry Ingress
 - Only HTTP `GET` requests to `/prometheus/api/v1/query` and `/prometheus/api/v1/query_range` are forwarded to Prometheus for dashboard charts.

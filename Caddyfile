@@ -18,7 +18,8 @@
 	}
 
 	# 1. API Gateway Protected Routes
-	handle /api/* {
+	@api_routes path /api /api/*
+	handle @api_routes {
 		reverse_proxy gateway:8080 {
 			header_up Host {host}
 			header_up X-Real-IP {remote_host}

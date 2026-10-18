@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -2740,6 +2741,329 @@ func TestBackendPool_CircuitBreakerIsolationAndFailover(t *testing.T) {
 		}
 		if !strings.Contains(rr.Body.String(), "circuit breaker is open") {
 			t.Fatalf("all-open request %d: expected circuit breaker open message, got %q", i, rr.Body.String())
+		}
+	}
+}
+
+// TestCircuitBreaker_BackendResponseHeaderTimeoutTripsBreaker verifies that if an upstream backend hangs,
+// ResponseHeaderTimeout aborts the request, increments failures, and trips the circuit breaker to Open.
+func TestCircuitBreaker_BackendResponseHeaderTimeoutTripsBreaker(t *testing.T) {
+	// Backend that sleeps 300ms, exceeding the 40ms transport timeout
+	hangingBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"too_late"}`))
+	}))
+	defer hangingBackend.Close()
+
+	u, err := url.Parse(hangingBackend.URL)
+	if err != nil {
+		t.Fatalf("failed to parse backend URL: %v", err)
+	}
+
+	cbThreshold := 3
+	cbCooldown := 1 * time.Second
+	cb := NewCircuitBreaker(cbThreshold, cbCooldown)
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 40 * time.Millisecond
+
+	node := NewBackendNode(u, cb, transport)
+	pool, err := NewBackendPool([]*BackendNode{node})
+	if err != nil {
+		t.Fatalf("failed to create pool: %v", err)
+	}
+
+	limiter := &mockLimiterAllowed{}
+	metrics := NewGatewayMetrics(prometheus.NewRegistry())
+	handler := newGatewayHandler(testAPIKey, pool, limiter, metrics)
+
+	// Send requests that will time out
+	for i := 1; i <= cbThreshold; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		// 502 Bad Gateway returned by reverse proxy when transport times out
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("request %d: expected 502 Bad Gateway on timeout, got %d", i, rr.Code)
+		}
+
+		if cb.ConsecutiveFailures() != i && i < cbThreshold {
+			t.Fatalf("request %d: expected %d consecutive failures, got %d", i, i, cb.ConsecutiveFailures())
+		}
+	}
+
+	// Verify breaker has tripped to StateOpen
+	if cb.State() != StateOpen {
+		t.Fatalf("expected breaker to be StateOpen after %d timeouts, got %v", cbThreshold, cb.State())
+	}
+
+	// Subsequent request fast-fails with 503 Service Unavailable and Retry-After
+	req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	req.Header.Set("X-API-Key", testAPIKey)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable when breaker is open, got %d", rr.Code)
+	}
+	if rr.Header().Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After header on 503 open breaker response")
+	}
+}
+
+// TestGateway_GracefulShutdownInFlight verifies that an in-flight request finishes cleanly
+// during server shutdown, the server exits with ErrServerClosed, and new requests are rejected.
+func TestGateway_GracefulShutdownInFlight(t *testing.T) {
+	// Backend with simulated latency
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"in_flight_success"}`))
+	}))
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("failed to parse backend URL: %v", err)
+	}
+
+	cb := NewCircuitBreaker(5, 10*time.Second)
+	node := NewBackendNode(backendURL, cb, http.DefaultTransport)
+	pool, err := NewBackendPool([]*BackendNode{node})
+	if err != nil {
+		t.Fatalf("failed to create pool: %v", err)
+	}
+
+	limiter := &mockLimiterAllowed{}
+	metrics := NewGatewayMetrics(prometheus.NewRegistry())
+	handler := newGatewayHandler(testAPIKey, pool, limiter, metrics)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+
+	server := &http.Server{
+		Handler: handler,
+	}
+
+	serverErrCh := make(chan error, 1)
+	go func() {
+		serverErrCh <- server.Serve(listener)
+	}()
+
+	addr := listener.Addr().String()
+
+	type reqResult struct {
+		statusCode int
+		err        error
+		body       string
+	}
+	resCh := make(chan reqResult, 1)
+
+	// Launch in-flight request
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/api/students", nil)
+		if err != nil {
+			resCh <- reqResult{err: err}
+			return
+		}
+		req.Header.Set("X-API-Key", testAPIKey)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			resCh <- reqResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resCh <- reqResult{
+			statusCode: resp.StatusCode,
+			body:       string(bodyBytes),
+		}
+	}()
+
+	// Allow request to enter the gateway and reach the backend
+	time.Sleep(30 * time.Millisecond)
+
+	// Trigger graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("server.Shutdown failed: %v", err)
+	}
+
+	// Verify in-flight request completed successfully with 200 OK
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			t.Fatalf("in-flight request failed: %v", res.err)
+		}
+		if res.statusCode != http.StatusOK {
+			t.Fatalf("expected in-flight status 200 OK, got %d", res.statusCode)
+		}
+		if !strings.Contains(res.body, "in_flight_success") {
+			t.Fatalf("unexpected body: %q", res.body)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for in-flight request to complete during shutdown")
+	}
+
+	// Verify server exited with ErrServerClosed
+	if err := <-serverErrCh; err != nil && err != http.ErrServerClosed {
+		t.Fatalf("expected ErrServerClosed, got: %v", err)
+	}
+
+	// Verify new connection after shutdown fails
+	newReq, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/api/students", nil)
+	newReq.Header.Set("X-API-Key", testAPIKey)
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	_, err = client.Do(newReq)
+	if err == nil {
+		t.Fatal("expected request after shutdown to fail, but it succeeded")
+	}
+}
+
+// mockExceededLimiter simulates a rate limiter that rejects requests due to quota exhaustion.
+type mockExceededLimiter struct{}
+
+func (m *mockExceededLimiter) Allow(ctx context.Context, identity string) (RateLimitResult, error) {
+	return RateLimitResult{
+		Allowed:    false,
+		Limit:      10,
+		Remaining:  0,
+		RetryAfter: 45,
+	}, nil
+}
+
+// TestMetrics_ComprehensiveStatusAccounting verifies that all key status codes
+// (200, 401, 429, 502, 503) are accurately reflected in Prometheus request metrics.
+func TestMetrics_ComprehensiveStatusAccounting(t *testing.T) {
+	// Healthy backend
+	healthyBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer healthyBackend.Close()
+
+	healthyURL, _ := url.Parse(healthyBackend.URL)
+	cbHealthy := NewCircuitBreaker(5, 10*time.Second)
+	nodeHealthy := NewBackendNode(healthyURL, cbHealthy, http.DefaultTransport)
+	poolHealthy, _ := NewBackendPool([]*BackendNode{nodeHealthy})
+
+	// Broken backend (unreachable port for 502)
+	brokenURL, _ := url.Parse("http://127.0.0.1:59998")
+	cbBroken := NewCircuitBreaker(10, 10*time.Second) // high threshold to not trip
+	nodeBroken := NewBackendNode(brokenURL, cbBroken, http.DefaultTransport)
+	poolBroken, _ := NewBackendPool([]*BackendNode{nodeBroken})
+
+	reg := prometheus.NewRegistry()
+	metrics := NewGatewayMetrics(reg)
+
+	allowedLimiter := &mockLimiterAllowed{}
+	exceededLimiter := &mockExceededLimiter{}
+	failingLimiter := &mockFailingLimiter{}
+
+	// Handler with healthy backend
+	hHealthy := newGatewayHandler(testAPIKey, poolHealthy, allowedLimiter, metrics)
+	// Handler with exceeded quota
+	hExceeded := newGatewayHandler(testAPIKey, poolHealthy, exceededLimiter, metrics)
+	// Handler with failing Redis
+	hFailingRedis := newGatewayHandler(testAPIKey, poolHealthy, failingLimiter, metrics)
+	// Handler with broken backend
+	hBrokenBackend := newGatewayHandler(testAPIKey, poolBroken, allowedLimiter, metrics)
+
+	// 1. Send 2x 200 OK
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+		hHealthy.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rr.Code)
+		}
+	}
+
+	// 2. Send 3x 401 Unauthorized
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", "invalid-key")
+		rr := httptest.NewRecorder()
+		hHealthy.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rr.Code)
+		}
+	}
+
+	// 3. Send 4x 429 Too Many Requests
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+		hExceeded.ServeHTTP(rr, req)
+		if rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected 429, got %d", rr.Code)
+		}
+	}
+
+	// 4. Send 2x 503 Service Unavailable (Redis error)
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+		hFailingRedis.ServeHTTP(rr, req)
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d", rr.Code)
+		}
+	}
+
+	// 5. Send 1x 502 Bad Gateway (Backend transport error)
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+		req.Header.Set("X-API-Key", testAPIKey)
+		rr := httptest.NewRecorder()
+		hBrokenBackend.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadGateway {
+			t.Fatalf("expected 502, got %d", rr.Code)
+		}
+	}
+
+	// Verify counts from Prometheus exposition format
+	rec := httptest.NewRecorder()
+	scrapeReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	hHealthy.ServeHTTP(rec, scrapeReq)
+
+	metricsOutput := rec.Body.String()
+
+	expectedCounts := map[string]string{
+		`gateway_requests_total{code="200",method="GET"}`: "2",
+		`gateway_requests_total{code="401",method="GET"}`: "3",
+		`gateway_requests_total{code="429",method="GET"}`: "4",
+		`gateway_requests_total{code="503",method="GET"}`: "2",
+		`gateway_requests_total{code="502",method="GET"}`: "1",
+	}
+
+	for metricLine, expectedVal := range expectedCounts {
+		found := false
+		for _, line := range strings.Split(metricsOutput, "\n") {
+			if strings.HasPrefix(line, metricLine) {
+				found = true
+				parts := strings.Fields(line)
+				if len(parts) >= 2 && parts[1] != expectedVal {
+					t.Errorf("for %s: expected %s, got %s", metricLine, expectedVal, parts[1])
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected metric line %s not found in output", metricLine)
 		}
 	}
 }

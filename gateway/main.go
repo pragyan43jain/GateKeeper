@@ -997,10 +997,18 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
+	backendTimeout, err := parseEnvDurationPositive("BACKEND_TIMEOUT", 10*time.Second)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+
+	backendTransport := http.DefaultTransport.(*http.Transport).Clone()
+	backendTransport.ResponseHeaderTimeout = backendTimeout
+
 	nodes := make([]*BackendNode, 0, len(backendURLs))
 	for _, u := range backendURLs {
 		cb := NewCircuitBreaker(cbThreshold, cbCooldown)
-		node := NewBackendNode(u, cb, http.DefaultTransport)
+		node := NewBackendNode(u, cb, backendTransport)
 		nodes = append(nodes, node)
 	}
 
@@ -1045,7 +1053,7 @@ func main() {
 	for _, u := range backendURLs {
 		backendStrs = append(backendStrs, u.String())
 	}
-	log.Printf("Gatekeeper running at http://localhost:%s (backends: %v, redis: %s, cb_threshold: %d, cb_cooldown: %s)", port, backendStrs, redisAddr, cbThreshold, cbCooldown)
+	log.Printf("Gatekeeper running at http://localhost:%s (backends: %v, redis: %s, cb_threshold: %d, cb_cooldown: %s, backend_timeout: %s)", port, backendStrs, redisAddr, cbThreshold, cbCooldown, backendTimeout)
 
 	serverErr := make(chan error, 1)
 	go func() {

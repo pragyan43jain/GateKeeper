@@ -137,6 +137,7 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - CIRCUIT_BREAKER_FAILURE_THRESHOLD=${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
       - CIRCUIT_BREAKER_COOLDOWN=${CIRCUIT_BREAKER_COOLDOWN:-10s}
+      - BACKEND_TIMEOUT=${BACKEND_TIMEOUT:-10s}
     depends_on:
       backend-1:
         condition: service_healthy

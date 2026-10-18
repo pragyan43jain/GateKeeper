@@ -71,4 +71,27 @@ func TestBackendHandler_BackendID(t *testing.T) {
 			t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
 		}
 	})
+
+	t.Run("HeadMethodReturnsHeadersWithoutBody", func(t *testing.T) {
+		handler := newBackendHandler("backend-1")
+		req := httptest.NewRequest(http.MethodHead, "/api/students", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for HEAD, got %d", rr.Code)
+		}
+
+		if got := rr.Header().Get("X-Backend-Id"); got != "backend-1" {
+			t.Errorf("expected X-Backend-Id 'backend-1', got %q", got)
+		}
+
+		if got := rr.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("expected Content-Type 'application/json', got %q", got)
+		}
+
+		if rr.Body.Len() != 0 {
+			t.Errorf("expected empty body for HEAD request, got %d bytes: %q", rr.Body.Len(), rr.Body.String())
+		}
+	})
 }

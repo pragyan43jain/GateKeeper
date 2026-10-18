@@ -73,7 +73,10 @@ export function App() {
           const c200 = m.requestsByCode['200'] || 0
           const c401 = m.requestsByCode['401'] || 0
           const c429 = m.requestsByCode['429'] || 0
-          const c5xx = (m.requestsByCode['502'] || 0) + (m.requestsByCode['503'] || 0)
+          const c5xx = Object.entries(m.requestsByCode).reduce(
+            (acc, [code, val]) => (code.startsWith('5') ? acc + val : acc),
+            0
+          )
           const total = m.totalRequests
 
           let rate200 = 0
