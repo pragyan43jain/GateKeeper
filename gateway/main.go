@@ -885,6 +885,65 @@ func newGatewayHandler(apiKey string, proxy http.Handler, limiter RateLimiter, m
 	return m.InstrumentHandler(mux)
 }
 
+// corsMiddleware wraps an http.Handler with Cross-Origin Resource Sharing (CORS) headers.
+func corsMiddleware(allowedOriginsStr string, next http.Handler) http.Handler {
+	var allowedOrigins []string
+	allowAll := false
+	trimmed := strings.TrimSpace(allowedOriginsStr)
+	if trimmed == "" || trimmed == "*" {
+		allowAll = true
+	} else {
+		for _, o := range strings.Split(trimmed, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				if o == "*" {
+					allowAll = true
+					break
+				}
+				allowedOrigins = append(allowedOrigins, o)
+			}
+		}
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		var matchedOrigin string
+
+		if allowAll {
+			matchedOrigin = "*"
+		} else if origin != "" {
+			for _, allowed := range allowedOrigins {
+				if strings.EqualFold(origin, allowed) {
+					matchedOrigin = origin
+					break
+				}
+			}
+		}
+
+		if matchedOrigin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", matchedOrigin)
+			if matchedOrigin != "*" {
+				w.Header().Add("Vary", "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "X-API-Key, Content-Type, Authorization, Accept, Origin, X-Requested-With")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Backend-Id, X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After, X-Gateway")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		}
+
+		// Handle preflight OPTIONS request before hitting auth/rate-limiting/proxy
+		if r.Method == http.MethodOptions {
+			if origin != "" && matchedOrigin == "" && !allowAll {
+				http.Error(w, "Forbidden: CORS origin not allowed", http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func getEnv(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
@@ -1017,16 +1076,29 @@ func main() {
 		log.Fatalf("failed to initialize backend pool: %v", err)
 	}
 
-	// Redis connection settings.
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
-	redisPassword := os.Getenv("REDIS_PASSWORD")
-	redisDB := getEnvInt("REDIS_DB", 0)
+	// Redis connection settings. Supports REDIS_URL (e.g. from Render Key Value or Upstash),
+	// falling back to REDIS_ADDR, REDIS_PASSWORD, and REDIS_DB.
+	var rdb *redis.Client
+	redisSource := "REDIS_ADDR"
+	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			log.Fatalf("invalid REDIS_URL: %v", err)
+		}
+		rdb = redis.NewClient(opt)
+		redisSource = "REDIS_URL"
+	} else {
+		redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+		redisPassword := os.Getenv("REDIS_PASSWORD")
+		redisDB := getEnvInt("REDIS_DB", 0)
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: redisPassword,
-		DB:       redisDB,
-	})
+		rdb = redis.NewClient(&redis.Options{
+			Addr:     redisAddr,
+			Password: redisPassword,
+			DB:       redisDB,
+		})
+		redisSource = redisAddr
+	}
 	defer rdb.Close()
 
 	// Rate limiter configuration: 10 requests per 60 seconds by default.
@@ -1038,7 +1110,9 @@ func main() {
 	metrics := NewGatewayMetrics(prometheus.NewRegistry())
 	pool.SetMetrics(metrics)
 
-	handler := newGatewayHandler(apiKey, pool, limiter, metrics)
+	gwHandler := newGatewayHandler(apiKey, pool, limiter, metrics)
+	corsOrigins := getEnv("CORS_ALLOWED_ORIGINS", "*")
+	handler := corsMiddleware(corsOrigins, gwHandler)
 
 	port := getEnv("PORT", "8080")
 
@@ -1053,7 +1127,7 @@ func main() {
 	for _, u := range backendURLs {
 		backendStrs = append(backendStrs, u.String())
 	}
-	log.Printf("Gatekeeper running at http://localhost:%s (backends: %v, redis: %s, cb_threshold: %d, cb_cooldown: %s, backend_timeout: %s)", port, backendStrs, redisAddr, cbThreshold, cbCooldown, backendTimeout)
+	log.Printf("Gatekeeper running at http://localhost:%s (backends: %v, redis: %s, cb_threshold: %d, cb_cooldown: %s, backend_timeout: %s)", port, backendStrs, redisSource, cbThreshold, cbCooldown, backendTimeout)
 
 	serverErr := make(chan error, 1)
 	go func() {

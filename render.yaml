@@ -1,0 +1,60 @@
+services:
+  # 1. Redis-compatible Key Value Store for Sliding-Window Rate Limiting
+  - type: keyvalue
+    name: gatekeeper-redis
+    plan: free
+    ipAllowList: [] # Restricts access to internal Render network
+
+  # 2. Upstream Backend Instance 1
+  - type: web
+    name: gatekeeper-backend-1
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    plan: free
+    healthCheckPath: /api/students
+    envVars:
+      - key: BACKEND_ID
+        value: backend-1
+
+  # 3. Upstream Backend Instance 2
+  - type: web
+    name: gatekeeper-backend-2
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    plan: free
+    healthCheckPath: /api/students
+    envVars:
+      - key: BACKEND_ID
+        value: backend-2
+
+  # 4. GateKeeper API Gateway
+  - type: web
+    name: gatekeeper-gateway
+    runtime: docker
+    dockerfilePath: ./gateway/Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: GATEKEEPER_API_KEY
+        generateValue: true
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: gatekeeper-redis
+          property: connectionString
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://frontend-8zy9berte-pragyan43jains-projects.vercel.app,https://frontend-zeta-pearl-bt8xd0e8u3.vercel.app"
+      - key: BACKEND_TIMEOUT
+        value: "60s"
+      - key: CIRCUIT_BREAKER_FAILURE_THRESHOLD
+        value: "5"
+      - key: CIRCUIT_BREAKER_COOLDOWN
+        value: "10s"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "10"
+      - key: RATE_LIMIT_WINDOW
+        value: "60s"
+      - key: BACKEND_URLS
+        sync: false

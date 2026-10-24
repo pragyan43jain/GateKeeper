@@ -72,13 +72,16 @@ export function parsePrometheusText(text: string): MetricSample[] {
   return samples
 }
 
+const rawApiUrl = (import.meta as unknown as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL
+export const API_BASE = typeof rawApiUrl === 'string' ? rawApiUrl.trim().replace(/\/+$/, '') : ''
+
 /**
  * Checks the gateway public /health endpoint.
  */
 export async function fetchGatewayHealth(): Promise<GatewayHealth> {
   const startTime = Date.now()
   try {
-    const response = await fetch('/health', {
+    const response = await fetch(`${API_BASE}/health`, {
       method: 'GET',
       cache: 'no-store',
     })
@@ -130,7 +133,7 @@ function numToCircuitState(num: number): CircuitBreakerState {
  * Fetches and aggregates Gatekeeper Prometheus metrics from /metrics.
  */
 export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
-  const response = await fetch('/metrics', {
+  const response = await fetch(`${API_BASE}/metrics`, {
     method: 'GET',
     cache: 'no-store',
   })
@@ -238,18 +241,18 @@ export function normalizePlaygroundUrl(inputUrl: string): NormalizedTarget {
   const trimmed = inputUrl.trim()
   if (!trimmed) {
     return {
-      effectiveUrl: '/api/students',
+      effectiveUrl: API_BASE ? `${API_BASE}/api/students` : '/api/students',
       normalized: true,
       originalUrl: inputUrl,
       isExternal: false,
     }
   }
 
-  // 1. Already a relative path: route through Vite dev proxy
+  // 1. Already a relative path: route through API_BASE or Vite dev proxy
   if (trimmed.startsWith('/')) {
     return {
-      effectiveUrl: trimmed,
-      normalized: false,
+      effectiveUrl: API_BASE ? `${API_BASE}${trimmed}` : trimmed,
+      normalized: Boolean(API_BASE),
       originalUrl: trimmed,
       isExternal: false,
     }
@@ -258,14 +261,14 @@ export function normalizePlaygroundUrl(inputUrl: string): NormalizedTarget {
   // 2. Relative path without leading slash
   if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
     return {
-      effectiveUrl: `/${trimmed}`,
+      effectiveUrl: API_BASE ? `${API_BASE}/${trimmed}` : `/${trimmed}`,
       normalized: true,
       originalUrl: trimmed,
       isExternal: false,
     }
   }
 
-  // 3. Absolute URL: check if it targets the local Gateway
+  // 3. Absolute URL: check if it targets the local Gateway or configured API_BASE
   try {
     const parsed = new URL(trimmed)
     const isLocalGateway =
@@ -275,11 +278,14 @@ export function normalizePlaygroundUrl(inputUrl: string): NormalizedTarget {
     const isCurrentOrigin =
       typeof window !== 'undefined' && parsed.origin === window.location.origin
 
-    if (isLocalGateway || isCurrentOrigin) {
-      // Normalize to relative path to route through Vite proxy and avoid browser CORS block
+    const isConfiguredApiBase =
+      Boolean(API_BASE) && (parsed.origin === new URL(API_BASE, window.location.href).origin)
+
+    if (isLocalGateway || isCurrentOrigin || isConfiguredApiBase) {
       const relativePath = parsed.pathname + parsed.search
+      const pathWithSlash = relativePath.startsWith('/') ? relativePath : `/${relativePath}`
       return {
-        effectiveUrl: relativePath.startsWith('/') ? relativePath : `/${relativePath}`,
+        effectiveUrl: API_BASE ? `${API_BASE}${pathWithSlash}` : pathWithSlash,
         normalized: true,
         originalUrl: trimmed,
         isExternal: false,
@@ -316,7 +322,7 @@ export async function fetchPrometheusTimeSeries(minutes: number = 15): Promise<T
     const step = Math.max(15, Math.floor((minutes * 60) / 20))
 
     const query = 'sum by (code) (rate(gateway_requests_total[1m]))'
-    const url = `/prometheus/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}s`
+    const url = `${API_BASE}/prometheus/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}s`
     const res = await fetch(url, { cache: 'no-store' })
     if (!res.ok) return null
 

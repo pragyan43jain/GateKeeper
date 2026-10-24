@@ -44,6 +44,11 @@ func main() {
 	if effectiveID == "" {
 		effectiveID = "backend"
 	}
-	log.Printf("Backend (%s) running at http://localhost:8081", effectiveID)
-	log.Fatal(http.ListenAndServe(":8081", handler))
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8081"
+	}
+	log.Printf("Backend (%s) running at http://localhost:%s", effectiveID, port)
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }

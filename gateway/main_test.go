@@ -3067,3 +3067,99 @@ func TestMetrics_ComprehensiveStatusAccounting(t *testing.T) {
 		}
 	}
 }
+
+func TestCORSMiddleware(t *testing.T) {
+	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Custom", "test")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	t.Run("WildcardOriginAllowed", func(t *testing.T) {
+		h := corsMiddleware("*", dummyHandler)
+
+		req := httptest.NewRequest(http.MethodOptions, "/api/students", nil)
+		req.Header.Set("Origin", "https://frontend.vercel.app")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("expected 204 No Content, got %d", rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("expected Access-Control-Allow-Origin '*', got %q", got)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "GET") {
+			t.Errorf("expected Allow-Methods to contain GET, got %q", got)
+		}
+		if got := rr.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Backend-Id") {
+			t.Errorf("expected Expose-Headers to contain X-Backend-Id, got %q", got)
+		}
+	})
+
+	t.Run("SpecificOriginAllowed", func(t *testing.T) {
+		h := corsMiddleware("https://frontend.vercel.app, http://localhost:5173", dummyHandler)
+
+		req := httptest.NewRequest(http.MethodOptions, "/api/students", nil)
+		req.Header.Set("Origin", "https://frontend.vercel.app")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("expected 204 No Content, got %d", rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://frontend.vercel.app" {
+			t.Errorf("expected Access-Control-Allow-Origin 'https://frontend.vercel.app', got %q", got)
+		}
+		if got := rr.Header().Get("Vary"); got != "Origin" {
+			t.Errorf("expected Vary 'Origin', got %q", got)
+		}
+	})
+
+	t.Run("DisallowedOriginOptionsRejected", func(t *testing.T) {
+		h := corsMiddleware("https://frontend.vercel.app", dummyHandler)
+
+		req := httptest.NewRequest(http.MethodOptions, "/api/students", nil)
+		req.Header.Set("Origin", "https://malicious-site.com")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden, got %d", rr.Code)
+		}
+	})
+
+	t.Run("NormalGETRequestWithOrigin", func(t *testing.T) {
+		h := corsMiddleware("https://frontend.vercel.app", dummyHandler)
+
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.Header.Set("Origin", "https://frontend.vercel.app")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://frontend.vercel.app" {
+			t.Errorf("expected Access-Control-Allow-Origin 'https://frontend.vercel.app', got %q", got)
+		}
+		if rr.Body.String() != "ok" {
+			t.Errorf("expected body 'ok', got %q", rr.Body.String())
+		}
+	})
+
+	t.Run("NormalGETRequestWithoutOrigin", func(t *testing.T) {
+		h := corsMiddleware("https://frontend.vercel.app", dummyHandler)
+
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("expected empty Access-Control-Allow-Origin without Origin header, got %q", got)
+		}
+	})
+}
