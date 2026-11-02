@@ -1,3 +1,4 @@
+import { TrafficChart } from './TrafficChart'
 import React, { useState, useMemo } from 'react'
 import {
   BarChart3,
@@ -8,8 +9,6 @@ import {
   Filter,
 } from 'lucide-react'
 import {
-  AreaChart,
-  Area,
   BarChart,
   Bar,
   XAxis,
@@ -57,7 +56,7 @@ export const MetricsSection: React.FC<MetricsSectionProps> = ({
 
     // Helper to format bucket upper bound label
     const formatBucketLabel = (rawLe: string): string => {
-      if (rawLe === '+Inf') return '>10s (+Inf)'
+      if (rawLe === '+Inf') return 'All requests'
       const val = parseFloat(rawLe)
       if (val < 1) {
         return `≤${Math.round(val * 1000)}ms`
@@ -119,93 +118,7 @@ export const MetricsSection: React.FC<MetricsSectionProps> = ({
         </div>
       </div>
 
-      {/* Time-Series Traffic Chart */}
-      <div className="p-5 rounded-xl bg-zinc-900 border border-zinc-800 shadow-sm">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                <Activity className="w-4 h-4 text-indigo-400" />
-                Request Rate Time-Series (req/s)
-              </h3>
-              {timeSeries && timeSeries.length > 0 && (
-                <span
-                  className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
-                    timeSeries[0]?.isFallback
-                      ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                      : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
-                  }`}
-                >
-                  {timeSeries[0]?.isFallback
-                    ? 'Fallback: Client Polling Rate'
-                    : 'Source: Prometheus rate[1m]'}
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-zinc-400 mt-0.5">
-              Live per-second request rate measured across response status codes (req/s).
-            </p>
-          </div>
-          <div className="flex items-center gap-4 text-xs font-mono">
-            <span className="flex items-center gap-1.5 text-zinc-300">
-              <span className="w-2.5 h-2.5 rounded-sm bg-indigo-500" />
-              200 OK (req/s)
-            </span>
-            <span className="flex items-center gap-1.5 text-zinc-300">
-              <span className="w-2.5 h-2.5 rounded-sm bg-amber-500" />
-              429 Limited (req/s)
-            </span>
-            <span className="flex items-center gap-1.5 text-zinc-300">
-              <span className="w-2.5 h-2.5 rounded-sm bg-rose-500" />
-              5xx Error (req/s)
-            </span>
-          </div>
-        </div>
-
-        {timeSeries && timeSeries.length > 0 ? (
-          <div className="h-60 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={timeSeries} margin={{ top: 10, right: 10, left: -15, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="metric200" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="metric429" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="metric5xx" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f43f5e" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="time" stroke="#71717a" fontSize={10} tickLine={false} />
-                <YAxis stroke="#71717a" fontSize={10} tickLine={false} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#18181b',
-                    borderColor: '#27272a',
-                    borderRadius: '8px',
-                    color: '#f4f4f5',
-                    fontSize: '11px',
-                    fontFamily: 'monospace',
-                  }}
-                  formatter={(val: any, name: any) => [`${val} req/s`, name]}
-                />
-                <Area type="monotone" dataKey="requests200" name="200 OK" stroke="#6366f1" strokeWidth={2} fillOpacity={1} fill="url(#metric200)" />
-                <Area type="monotone" dataKey="requests429" name="429 Too Many Requests" stroke="#f59e0b" strokeWidth={2} fillOpacity={1} fill="url(#metric429)" />
-                <Area type="monotone" dataKey="requests5xx" name="5xx Server Errors" stroke="#f43f5e" strokeWidth={2} fillOpacity={1} fill="url(#metric5xx)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        ) : (
-          <div className="h-48 flex items-center justify-center text-xs text-zinc-400">
-            Awaiting Prometheus time-series matrix points
-          </div>
-        )}
-      </div>
+      <TrafficChart points={timeSeries}/>
 
       {/* Latency Distribution & Histogram Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -243,7 +156,7 @@ export const MetricsSection: React.FC<MetricsSectionProps> = ({
                     }}
                     formatter={(val: any) => [`${val.toLocaleString()} requests`, 'Cumulative Count (≤ Bound)']}
                   />
-                  <Bar dataKey="count" name="Cumulative Requests" fill="#06b6d4" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="count" name="Cumulative Requests" fill="#32f59b" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

@@ -63,7 +63,7 @@ export function parsePrometheusText(text: string): MetricSample[] {
     samples.push({
       name,
       help: helpMap.get(name),
-      type: typeMap.get(name),
+      type: typeMap.get(name) || typeMap.get(name.replace(/_(bucket|sum|count)$/, '')),
       labels,
       value,
     })
@@ -82,6 +82,7 @@ export async function fetchGatewayHealth(): Promise<GatewayHealth> {
   const startTime = Date.now()
   try {
     const response = await fetch(`${API_BASE}/health`, {
+    signal: AbortSignal.timeout(8000),
       method: 'GET',
       cache: 'no-store',
     })
@@ -134,6 +135,7 @@ function numToCircuitState(num: number): CircuitBreakerState {
  */
 export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
   const response = await fetch(`${API_BASE}/metrics`, {
+    signal: AbortSignal.timeout(8000),
     method: 'GET',
     cache: 'no-store',
   })
@@ -151,14 +153,8 @@ export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
   let durationSum = 0
   let durationCount = 0
 
-  const backendStates: Record<string, CircuitBreakerState> = {
-    'backend-1:8081': 'closed',
-    'backend-2:8081': 'closed',
-  }
-  const backendTrips: Record<string, number> = {
-    'backend-1:8081': 0,
-    'backend-2:8081': 0,
-  }
+  const backendStates: Record<string, CircuitBreakerState> = {}
+  const backendTrips: Record<string, number> = {}
 
   for (const s of samples) {
     if (s.name === 'gateway_requests_total') {
@@ -187,36 +183,13 @@ export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
   const avgLatencyMs = durationCount > 0 ? (durationSum / durationCount) * 1000 : null
 
   // Format backend statuses
-  const knownBackends: BackendNodeStatus[] = [
-    {
-      id: 'backend-1:8081',
-      displayName: 'backend-1',
-      target: 'http://backend-1:8081',
-      state: backendStates['backend-1:8081'] || 'closed',
-      trips: backendTrips['backend-1:8081'] || 0,
-    },
-    {
-      id: 'backend-2:8081',
-      displayName: 'backend-2',
-      target: 'http://backend-2:8081',
-      state: backendStates['backend-2:8081'] || 'closed',
-      trips: backendTrips['backend-2:8081'] || 0,
-    },
-  ]
-
-  // Add any other backend found dynamically
-  for (const [key, state] of Object.entries(backendStates)) {
-    if (key !== 'backend-1:8081' && key !== 'backend-2:8081') {
-      const cleanName = key.split(':')[0]
-      knownBackends.push({
-        id: key,
-        displayName: cleanName,
-        target: `http://${key}`,
-        state,
-        trips: backendTrips[key] || 0,
-      })
-    }
-  }
+  const knownBackends: BackendNodeStatus[] = Object.entries(backendStates).map(([id, state]) => ({
+    id,
+    displayName: id,
+    target: id,
+    state,
+    trips: backendTrips[id] || 0,
+  }))
 
   return {
     totalRequests,
@@ -323,7 +296,7 @@ export async function fetchPrometheusTimeSeries(minutes: number = 15): Promise<T
 
     const query = 'sum by (code) (rate(gateway_requests_total[1m]))'
     const url = `${API_BASE}/prometheus/api/v1/query_range?query=${encodeURIComponent(query)}&start=${start}&end=${end}&step=${step}s`
-    const res = await fetch(url, { cache: 'no-store' })
+    const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
     if (!res.ok) return null
 
     const data = await res.json()
@@ -414,6 +387,7 @@ export async function executePlaygroundRequest(
 
   try {
     const response = await fetch(target.effectiveUrl, {
+      signal: AbortSignal.timeout(15000),
       method,
       headers,
       body: body && (method === 'POST' || method === 'PUT' || method === 'PATCH') ? body : undefined,

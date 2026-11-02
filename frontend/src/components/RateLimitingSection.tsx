@@ -41,15 +41,15 @@ export const RateLimitingSection: React.FC<RateLimitingSectionProps> = ({
         <div>
           <h2 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <Gauge className="w-4 h-4 text-amber-400" />
-            Redis Sliding-Window Rate Limiter
+            Redis Fixed-Window Rate Limiter
           </h2>
           <p className="text-xs text-zinc-400 mt-0.5">
-            Distributed token-bucket / counter enforced by Redis Lua scripts with SHA-256 key isolation.
+            Distributed fixed-window counter enforced by Redis Lua scripts with SHA-256 key isolation.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs font-mono">
           <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">
-            Quota: <strong className="text-amber-400">10 req / 60s</strong>
+            Default quota: <strong className="text-amber-400">10 req / 60s</strong>
           </span>
           <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">
             Storage: <strong className="text-indigo-400">Redis 7</strong>
@@ -91,7 +91,7 @@ export const RateLimitingSection: React.FC<RateLimitingSectionProps> = ({
               <div className="space-y-4 my-6">
                 <div>
                   <div className="flex justify-between text-xs font-mono mb-2">
-                    <span className="text-zinc-400">Consumed in 60s Window:</span>
+                    <span className="text-zinc-400">Consumed in Current Window:</span>
                     <span className="text-zinc-200 font-bold">{limitNum - remainingNum} / {limitNum} ({usedPercent}%)</span>
                   </div>
                   {/* Progress Bar */}

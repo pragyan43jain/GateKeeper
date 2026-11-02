@@ -87,7 +87,7 @@ func NewRedisRateLimiter(client redis.UniversalClient, prefix string, limit int6
 // Allow atomically checks and increments the rate limit counter for the given identity hash.
 func (r *RedisRateLimiter) Allow(ctx context.Context, identity string) (RateLimitResult, error) {
 	key := r.prefix + identity
-	windowSecs := int64(r.window.Seconds())
+	windowSecs := int64(math.Ceil(r.window.Seconds()))
 	if windowSecs <= 0 {
 		windowSecs = 1
 	}
@@ -481,7 +481,16 @@ type BackendNode struct {
 // NewBackendNode constructs a new BackendNode with its own ReverseProxy and CircuitBreaker.
 func NewBackendNode(target *url.URL, cb *CircuitBreaker, transport http.RoundTripper) *BackendNode {
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = NewCircuitBreakerTransport(cb, transport)
+	proxy.Transport = transport
+	if cb != nil {
+		proxy.Transport = NewCircuitBreakerTransport(cb, transport)
+	}
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		req.Host = target.Host
+		req.Header.Del("X-API-Key")
+	}
 
 	name := target.Host
 	if name == "" {
@@ -657,6 +666,10 @@ func newStatusResponseWriter(w http.ResponseWriter) *statusResponseWriter {
 }
 
 func (rw *statusResponseWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 {
+		rw.ResponseWriter.WriteHeader(code)
+		return
+	}
 	if !rw.wroteHeader {
 		rw.statusCode = code
 		rw.wroteHeader = true
@@ -673,6 +686,9 @@ func (rw *statusResponseWriter) Write(b []byte) (int, error) {
 
 // Flush implements http.Flusher to ensure streaming / chunked proxy responses work properly.
 func (rw *statusResponseWriter) Flush() {
+	if !rw.wroteHeader {
+		rw.WriteHeader(http.StatusOK)
+	}
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -817,7 +833,7 @@ func newGatewayHandler(apiKey string, proxy http.Handler, limiter RateLimiter, m
 		providedKey := r.Header.Get("X-API-Key")
 
 		// 1. Authenticate: Reject missing or invalid keys before any rate limit check or forwarding.
-		if subtle.ConstantTimeCompare(
+		if apiKey == "" || providedKey == "" || subtle.ConstantTimeCompare(
 			[]byte(providedKey),
 			[]byte(apiKey),
 		) != 1 {
@@ -1020,8 +1036,8 @@ func parseBackendURLs(urlsStr, fallbackURL string) ([]*url.URL, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid backend URL %q: %w", trimmed, err)
 		}
-		if u.Scheme == "" || u.Host == "" {
-			return nil, fmt.Errorf("invalid backend URL %q: scheme and host are required", trimmed)
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" {
+			return nil, fmt.Errorf("invalid backend URL %q: HTTP(S) scheme and host required; credentials and fragments are not allowed", trimmed)
 		}
 		urls = append(urls, u)
 	}
@@ -1102,11 +1118,17 @@ func main() {
 	defer rdb.Close()
 
 	// Rate limiter configuration: 10 requests per 60 seconds by default.
-	maxRequests := int64(getEnvInt("RATE_LIMIT_MAX_REQUESTS", 10))
-	window := getEnvDuration("RATE_LIMIT_WINDOW", 60*time.Second)
+	maxRequests, err := parseEnvIntPositive("RATE_LIMIT_MAX_REQUESTS", 10)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+	window, err := parseEnvDurationPositive("RATE_LIMIT_WINDOW", 60*time.Second)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
 	keyPrefix := getEnv("REDIS_KEY_PREFIX", "gatekeeper:rate_limit:")
 
-	limiter := NewRedisRateLimiter(rdb, keyPrefix, maxRequests, window)
+	limiter := NewRedisRateLimiter(rdb, keyPrefix, int64(maxRequests), window)
 	metrics := NewGatewayMetrics(prometheus.NewRegistry())
 	pool.SetMetrics(metrics)
 

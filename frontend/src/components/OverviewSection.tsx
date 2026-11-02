@@ -8,15 +8,8 @@ import {
   ShieldAlert,
   ArrowUpRight,
 } from 'lucide-react'
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-} from 'recharts'
+import TechStackBento from '@/components/ui/interactive-tech-stack-bento-grid-with-hover-effects'
+import { WebShotButton } from '@/components/ui/web-shot-button'
 import type {
   GatewayHealth,
   GatewayMetricsSummary,
@@ -50,18 +43,34 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
   const totalErrors = requests401 + requests429 + requests5xx
 
   const successRate =
-    totalRequests > 0 ? ((requests200 / totalRequests) * 100).toFixed(1) : '100.0'
+    totalRequests > 0 ? ((requests200 / totalRequests) * 100).toFixed(1) : '—'
 
   const avgLatency =
     metrics?.avgLatencyMs !== null && metrics?.avgLatencyMs !== undefined
       ? `${metrics.avgLatencyMs.toFixed(2)} ms`
-      : '0.00 ms'
+      : '—'
 
   // Prepare chart data: either Prometheus matrix points or fallback summary
-  const chartData = timeSeries && timeSeries.length > 0 ? timeSeries : []
+
 
   return (
-    <div className="space-y-6">
+    <div className="overview-content space-y-6">
+      <section className="overview-hero">
+        <div className="hero-copy"><div className="eyebrow"><span/> YOUR INFRASTRUCTURE, IN FOCUS</div>
+          <h2>Every request.<br/><em>Under control.</em></h2>
+          <p>A clear view of your gateway. Follow the traffic, watch your upstreams, and keep your APIs moving.</p>
+          <div className="hero-actions"><WebShotButton color="#d92344" size="md" onClick={() => onNavigate('playground')}>Launch playground <ArrowUpRight size={17}/></WebShotButton><button className="hero-secondary" onClick={() => onNavigate('metrics')}>Explore metrics</button></div>
+        </div>
+        <div className="network-map" aria-label="Gateway routing topology">
+          <div className="orbit orbit-one"/><div className="orbit orbit-two"/>
+          <div className="network-label">LIVE ROUTING TOPOLOGY</div>
+          <div className="network-client"><Terminal size={16}/><span>Incoming requests</span></div>
+          <div className="network-line"/>
+          <div className="network-core"><Activity size={26}/><span>GATEKEEPER</span><small>{isHealthy ? 'Gateway online' : 'Connecting'}</small></div>
+          <div className="network-branches">{(metrics?.backends || []).map(b => <div className="network-node" key={b.id}><Server size={15}/><span>{b.displayName}</span><i className={b.state === 'closed' ? 'connected' : ''}/></div>)}{!metrics?.backends.length && <div className="network-node">Discovering upstreams…</div>}</div>
+        </div>
+      </section>
+      <div className="section-caption"><span>Gateway at a glance</span><small>LIVE TELEMETRY · AUTO-SYNCED</small></div>
       {/* KPI Cards Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Gateway Health */}
@@ -85,7 +94,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
           </div>
           <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
             <span>Route: /health</span>
-            <span className="text-zinc-300">200 OK</span>
+            <span className="text-zinc-300">{health?.statusCode ?? '—'}</span>
           </div>
         </div>
 
@@ -105,7 +114,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
           </div>
           <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
             <span>200 OK: {requests200.toLocaleString()}</span>
-            <span>Errors (401/429/5xx): {totalErrors.toLocaleString()}</span>
+            <span>Errors: {totalErrors.toLocaleString()}</span>
           </div>
         </div>
 
@@ -125,7 +134,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
           </div>
           <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
             <span>Count: {metrics?.totalDurationCount.toLocaleString() ?? 0}</span>
-            <span className="text-zinc-300">&lt; 10ms typical</span>
+            <span className="text-zinc-300">Observed latency</span>
           </div>
         </div>
 
@@ -140,134 +149,17 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
               {(metrics?.rateLimitRejections ?? 0).toLocaleString()}
             </div>
             <div className="text-xs text-zinc-400 mt-1">
-              Redis sliding-window 429s
+              Redis fixed-window 429s
             </div>
           </div>
           <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-            <span>Limit: 10 req / 60s</span>
+            <span>Default: 10 req / 60s</span>
             <span className="text-amber-400">Strict Lua</span>
           </div>
         </div>
       </div>
 
-      {/* Main Traffic Chart */}
-      <div className="p-5 rounded-xl bg-zinc-900 border border-zinc-800 shadow-sm">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
-                Request Rate & Traffic (req/s)
-              </h2>
-              {chartData.length > 0 && (
-                <span
-                  className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
-                    chartData[0]?.isFallback
-                      ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                      : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'
-                  }`}
-                >
-                  {chartData[0]?.isFallback
-                    ? 'Fallback: Client Polling Rate'
-                    : 'Source: Prometheus rate[1m]'}
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-zinc-400 mt-0.5">
-              Live request rate in requests per second.
-            </p>
-          </div>
-          <div className="flex items-center gap-4 text-xs font-mono">
-            <span className="flex items-center gap-1.5 text-zinc-300">
-              <span className="w-2.5 h-2.5 rounded-sm bg-indigo-500" />
-              200 OK (req/s)
-            </span>
-            <span className="flex items-center gap-1.5 text-zinc-300">
-              <span className="w-2.5 h-2.5 rounded-sm bg-rose-500" />
-              Errors: 401 / 429 / 5xx (req/s)
-            </span>
-          </div>
-        </div>
-
-        {chartData.length > 0 ? (
-          <div className="h-64 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="color200" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorErr" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f43f5e" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis
-                  dataKey="time"
-                  stroke="#71717a"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={{ stroke: '#27272a' }}
-                />
-                <YAxis
-                  stroke="#71717a"
-                  fontSize={11}
-                  tickLine={false}
-                  axisLine={{ stroke: '#27272a' }}
-                />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#18181b',
-                    borderColor: '#27272a',
-                    borderRadius: '8px',
-                    color: '#f4f4f5',
-                    fontSize: '12px',
-                    fontFamily: 'monospace',
-                  }}
-                  formatter={(val: any, name: any) => [`${val} req/s`, name]}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="requests200"
-                  name="200 OK"
-                  stroke="#6366f1"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#color200)"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="requestsError"
-                  name="Errors (401 / 429 / 5xx)"
-                  stroke="#f43f5e"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#colorErr)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        ) : (
-          <div className="h-64 w-full flex flex-col items-center justify-center border border-dashed border-zinc-800 rounded-lg text-center p-6">
-            <Activity className="w-8 h-8 text-zinc-400 mb-2" />
-            <div className="text-sm font-medium text-zinc-300">
-              Awaiting Prometheus time-series accumulation
-            </div>
-            <p className="text-xs text-zinc-400 mt-1 max-w-sm">
-              Current total processed: {totalRequests.toLocaleString()} requests. Run requests in the
-              API Playground to stream real-time throughput.
-            </p>
-            <button
-              onClick={() => onNavigate('playground')}
-              className="mt-4 px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white transition-colors flex items-center gap-1.5"
-            >
-              <Terminal className="w-3.5 h-3.5" />
-              Open API Playground
-            </button>
-          </div>
-        )}
-      </div>
+      <TechStackBento metrics={metrics} health={health} timeSeries={timeSeries} demo={false}/>
 
       {/* Two Column Section: Upstream Nodes & Quick Navigation */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -1,6 +1,6 @@
 # GateKeeper
 
-GateKeeper is a lightweight, high-performance API Gateway written in Go. It provides API-key authentication, atomic Redis-backed sliding-window rate limiting, round-robin load balancing with independent per-backend circuit breakers, reverse proxying, Prometheus metrics instrumentation, a modern React developer dashboard, and automated TLS termination via Caddy—packaged for turnkey deployment using Docker Compose.
+GateKeeper is a lightweight, high-performance API Gateway written in Go. It provides API-key authentication, atomic Redis-backed fixed-window rate limiting, round-robin load balancing with independent per-backend circuit breakers, reverse proxying, Prometheus metrics instrumentation, a modern React developer dashboard, and automated TLS termination via Caddy—packaged for turnkey deployment using Docker Compose.
 
 ---
 
@@ -56,7 +56,7 @@ flowchart TD
 
 - **Automated HTTPS & Edge Routing**: Caddy edge reverse proxy with automatic Let's Encrypt TLS certificate provisioning, HTTP-to-HTTPS redirection, and modern HTTP/2 + HTTP/3 support.
 - **API-Key Authentication**: Constant-time verification (`subtle.ConstantTimeCompare`) of the `X-API-Key` header on all `/api/*` routes.
-- **Atomic Redis Rate Limiting**: Fixed/sliding-window rate limiting powered by a single-threaded Redis Lua script to prevent concurrency race conditions. Supports password-authenticated Redis connections.
+- **Atomic Redis Rate Limiting**: Fixed/fixed-window rate limiting powered by a single-threaded Redis Lua script to prevent concurrency race conditions. Supports password-authenticated Redis connections.
 - **Round-Robin Load Balancing**: Thread-safe round-robin routing across multiple upstream backend instances (`backend-1`, `backend-2`).
 - **Independent Circuit Breakers**: Dedicated per-backend circuit breakers with isolated failure thresholds, cooldown intervals, and half-open trial probes. Automatically skips failing backends and fast-fails with `503 Service Unavailable` and `Retry-After` if all backends are down.
 - **Configurable Upstream Timeouts**: Gateway enforces bounded upstream `ResponseHeaderTimeout` (`BACKEND_TIMEOUT`, default: 10s). Slow or deadlocked backends are terminated with `502 Bad Gateway` and counted toward circuit breaker failure thresholds rather than hanging client connections indefinitely.
@@ -161,7 +161,7 @@ docker compose up -d --build
    ```bash
    docker compose ps
    ```
-   All 7 containers (`caddy`, `frontend`, `gateway`, `backend-1`, `backend-2`, `redis`, `prometheus`, `grafana`) should show status `Up (healthy)`.
+   All 8 containers (`caddy`, `frontend`, `gateway`, `backend-1`, `backend-2`, `redis`, `prometheus`, `grafana`) should show status `Up (healthy)`.
 
 2. **Verify Public Health Endpoint (over HTTPS)**:
    ```bash
@@ -187,7 +187,7 @@ docker compose up -d --build
    ```
 
 5. **Verify Rate Limiting**:
-   Send 11 rapid requests with your API key to observe the sliding-window limit:
+   Send 11 rapid requests with your API key to observe the fixed-window limit:
    ```bash
    for i in {1..11}; do
      curl -s -o /dev/null -w "%{http_code}\n" -H "X-API-Key: $KEY" https://gatekeeper.yourdomain.com/api/students
@@ -344,3 +344,12 @@ go test -race -v -count=1 ./...
 go vet ./...
 ```
 
+
+## Project checks
+
+The current implementation scope and validation steps are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+Run `make check` for Go race tests, vet, frontend build, and lint. Redis integration tests
+require Redis on `localhost:6379`; CI provisions it automatically.
+Run `make up` to build and start the stack, then use `make smoke` with
+`GATEKEEPER_API_KEY` set. For local self-signed Caddy TLS only, set `ALLOW_LOCAL_TLS=1`.
+The backend is a read-only demonstration service; student records are sample data.

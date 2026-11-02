@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func newBackendHandler(backendID string) http.Handler {
@@ -50,5 +55,23 @@ func main() {
 		port = "8081"
 	}
 	log.Printf("Backend (%s) running at http://localhost:%s", effectiveID, port)
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+	server := &http.Server{Addr: ":" + port, Handler: handler,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		drain, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(drain); err != nil {
+			_ = server.Close()
+		}
+		close(done)
+	}()
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+	<-done
 }

@@ -1,3 +1,4 @@
+import { WebShotButton } from '@/components/ui/web-shot-button'
 import React, { useState } from 'react'
 import {
   Terminal,
@@ -203,7 +204,7 @@ export const PlaygroundSection: React.FC<PlaygroundSectionProps> = ({
           </div>
 
           {/* Send Button */}
-          <button
+          <WebShotButton color="#d92344" size="md"
             type="button"
             onClick={() => handleSend()}
             disabled={isLoading || isBursting}
@@ -220,7 +221,7 @@ export const PlaygroundSection: React.FC<PlaygroundSectionProps> = ({
                 <span>Send Request</span>
               </>
             )}
-          </button>
+          </WebShotButton>
         </div>
 
         {/* Right Column: Response Inspector (7 cols) */}

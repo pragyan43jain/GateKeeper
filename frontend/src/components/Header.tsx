@@ -14,23 +14,23 @@ interface HeaderProps {
 
 const tabMeta: Record<TabType, { title: string; subtitle: string }> = {
   overview: {
-    title: 'Gateway Overview',
+    title: 'Overview',
     subtitle: 'High-level telemetry, uptime, traffic distribution, and live system health.',
   },
   backends: {
-    title: 'Upstream Backends & Circuit Breakers',
+    title: 'Upstream nodes',
     subtitle: 'Per-backend node health, round-robin load distribution, and failure isolation states.',
   },
   ratelimit: {
     title: 'Redis Rate Limiting',
-    subtitle: 'Sliding-window policy inspection, active quota consumption, and 429 rejection tracking.',
+    subtitle: 'Fixed-window policy inspection, active quota consumption, and 429 rejection tracking.',
   },
   metrics: {
-    title: 'Prometheus Metrics & Telemetry',
+    title: 'Observability',
     subtitle: 'Time-series traffic graphs, status code breakdowns, and raw Prometheus scraped samples.',
   },
   playground: {
-    title: 'Interactive API Playground',
+    title: 'API playground',
     subtitle: 'Dispatch live authenticated HTTP requests to test failover, round-robin, and rate limits.',
   },
 }
@@ -48,9 +48,9 @@ export const Header: React.FC<HeaderProps> = ({
   const isHealthy = health?.status === 'healthy'
 
   return (
-    <header className="h-16 px-6 bg-zinc-900/60 border-b border-zinc-800 flex items-center justify-between shrink-0 backdrop-blur-sm sticky top-0 z-10">
+    <header className="console-header h-16 px-6 bg-zinc-900/60 border-b border-zinc-800 flex items-center justify-between shrink-0 backdrop-blur-sm sticky top-0 z-10">
       <div>
-        <h1 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
+        <div className="header-breadcrumb">WORKSPACE <span>/</span> GATEWAY</div><h1 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
           {meta.title}
         </h1>
         <p className="text-xs text-zinc-400 truncate max-w-xl">

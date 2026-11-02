@@ -47,7 +47,10 @@ export function App() {
     c5xx: number
   } | null>(null)
 
+  const refreshInFlight = useRef(false)
   const loadData = useCallback(async () => {
+    if (refreshInFlight.current) return
+    refreshInFlight.current = true
     setIsRefreshing(true)
     try {
       const [h, m, ts] = await Promise.all([
@@ -125,6 +128,7 @@ export function App() {
         }
       }
     } finally {
+      refreshInFlight.current = false
       setIsRefreshing(false)
     }
   }, [])
@@ -153,7 +157,7 @@ export function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 antialiased font-sans">
+    <div className="console-app flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 antialiased font-sans">
       {/* Sidebar Navigation */}
       <Sidebar
         currentTab={currentTab}
@@ -173,8 +177,8 @@ export function App() {
           onManualRefresh={loadData}
         />
 
-        <main className="flex-1 overflow-y-auto p-6 min-w-0">
-          <div className="max-w-7xl mx-auto space-y-6">
+        <main key={currentTab} className="flex-1 overflow-y-auto p-6 min-w-0">
+          <div className="content-container max-w-7xl mx-auto space-y-6">
             {currentTab === 'overview' && (
               <OverviewSection
                 health={health}

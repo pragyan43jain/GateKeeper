@@ -6,3 +6,7 @@ ARCHITECTURAL_AUDIT.txt
 docker-compose.dev.yml
 frontend/node_modules
 frontend/dist
+.env.*
+**/.env*
+.vercel
+frontend/.vercel
