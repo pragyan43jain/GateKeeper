@@ -2178,6 +2178,7 @@ func newGatewayHandlerWithOptions(apiKey string, proxy http.Handler, limiter Rat
 	var handler http.Handler = mux
 	handler = m.InstrumentHandler(handler)
 	handler = requestInspectorMiddleware(cfg.logger, handler)
+	handler = traceRequests(handler)
 	return handler
 }
 
@@ -2380,6 +2381,17 @@ func applyBackendWeights(pool *BackendPool, raw string) error {
 }
 
 func main() {
+	traceShutdown, err := initializeTracing(context.Background())
+	if err != nil {
+		log.Fatalf("tracing initialization failed: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := traceShutdown(ctx); err != nil {
+			log.Printf("tracing shutdown failed: %v", err)
+		}
+	}()
 	// Read the API key from the environment.
 	apiKey := os.Getenv("GATEKEEPER_API_KEY")
 	if apiKey == "" {

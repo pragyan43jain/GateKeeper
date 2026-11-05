@@ -372,6 +372,13 @@ go vet ./...
 
 ## Project checks
 
+Gateway tracing exports to an OTLP HTTP collector when `OTEL_EXPORTER_OTLP_ENDPOINT`
+is configured. W3C trace context is preserved and a gateway span is forwarded to
+upstreams. Root requests use 10% sampling; sampled parent traces are retained.
+Only request method and response status are attached as HTTP attributes. Shutdown
+flushes pending spans within five seconds. A collector is not provisioned by the
+default Compose stack; leaving the endpoint empty disables export.
+
 The current implementation scope and validation steps are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 Run `make check` for Go race tests, vet, frontend build, and lint. Redis integration tests
 require Redis on `localhost:6379`; CI provisions it automatically. The PostgreSQL migration
