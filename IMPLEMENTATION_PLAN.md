@@ -52,16 +52,17 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 
 ## Verified in this workspace
 
-- `go test ./...`, `go vet ./...`, and `go test -race ./...` pass after dashboard session and account changes.
+- `make check` passes with `TEST_DATABASE_URL` set, including Go race tests, `go vet`, frontend build/lint, 13 frontend service tests, and the PostgreSQL integration test.
 - Frontend TypeScript production build, lint, and all 13 service tests pass. The frontend build reports a non-blocking large-chunk warning.
 - `docker compose config --quiet` and `docker compose build gateway` pass.
 - Redis sliding-window boundary, quota, and concurrency tests pass against the configured local Redis service.
 - Caddy validation was not run in this environment because the `caddy` executable is unavailable. The Caddy service already running was not restarted.
-- PostgreSQL integration has not yet been rerun against the latest third migration, dashboard sessions, and admin user management. No running services or persisted volumes were modified in this work slice.
+- PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all three migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
+- `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
 ## Still incomplete
 
 - Persist request history across gateway restarts; current Inspector history is bounded in-memory.
 - Add OpenTelemetry tracing and production alert rules; current observability is Prometheus metrics and structured request records.
-- Exercise the complete login/setup, role enforcement, key issuance, traffic policy, backend failure/recovery, request inspection, and logout path against PostgreSQL in Docker.
+- Exercise the full cross-service demo path for key issuance, traffic policy, backend failure/recovery, and request inspection against the running Compose stack.
 - Finish security review, setup/deployment documentation, k6 load suite, and CI checks for the final architecture.
