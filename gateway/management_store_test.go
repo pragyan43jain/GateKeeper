@@ -59,6 +59,25 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	}
 
 	store := NewManagementStore(db)
+	history := NewRequestLogger(2)
+	stopHistory, err := startRequestHistory(store, history, "integration-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	history.Record(RequestLogEntry{ID: "oldest", Status: 200})
+	history.Record(RequestLogEntry{ID: "retained", Status: 503})
+	history.Record(RequestLogEntry{ID: "newest", Status: 200})
+	stopHistory()
+	restored := NewRequestLogger(2)
+	stopRestored, err := startRequestHistory(store, restored, "integration-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopRestored()
+	entries := restored.GetEntries(2, 0, "", "")
+	if len(entries) != 2 || entries[0].ID != "newest" || entries[1].ID != "retained" {
+		t.Fatalf("history restore ordering/bound: %+v", entries)
+	}
 	app, err := store.CreateApplication(ctx, "integration-"+time.Now().Format("150405.000000000"), "test application")
 	if err != nil {
 		t.Fatalf("create application: %v", err)

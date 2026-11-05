@@ -372,6 +372,17 @@ go vet ./...
 
 ## Project checks
 
+Inspector history is bounded by `MAX_LOG_ENTRIES` (default 500). With PostgreSQL
+enabled, each gateway checkpoints its ring every two seconds and on graceful
+shutdown, then restores it at startup. An abrupt crash can lose records since
+the last successful checkpoint; this is diagnostic history, not an audit ledger.
+Set a stable, unique `GATEWAY_INSTANCE_ID` for each replica. History queries return
+the current replica's records. Remove snapshots for retired instance IDs as part
+of decommissioning. Database checkpoint failures are logged while traffic continues.
+
+Load-test instructions and alert-delivery limitations are in
+[scripts/LOAD_TESTING.md](scripts/LOAD_TESTING.md).
+
 Gateway tracing exports to an OTLP HTTP collector when `OTEL_EXPORTER_OTLP_ENDPOINT`
 is configured. W3C trace context is preserved and a gateway span is forwarded to
 upstreams. Root requests use 10% sampling; sampled parent traces are retained.

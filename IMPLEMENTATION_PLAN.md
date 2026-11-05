@@ -56,13 +56,13 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - Frontend TypeScript production build, lint, and all 13 service tests pass. The frontend build reports a non-blocking large-chunk warning.
 - `docker compose config --quiet` and `docker compose build gateway` pass.
 - Redis sliding-window boundary, quota, and concurrency tests pass against the configured local Redis service.
-- Caddy validation was not run in this environment because the `caddy` executable is unavailable. The Caddy service already running was not restarted.
 - PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all three migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
 ## Still incomplete
 
-- Persist request history across gateway restarts; current Inspector history is bounded in-memory.
-- Add OpenTelemetry tracing and production alert rules; current observability is Prometheus metrics and structured request records.
+- Inspector history now checkpoints to PostgreSQL every two seconds and restores its bounded ring on startup; restart retention and ordering pass PostgreSQL integration tests.
+- OpenTelemetry OTLP export and parent-context propagation pass a collector integration test. Four Prometheus alert rules pass promtool validation. External alert delivery still requires an operator-configured receiver.
+- The k6 traffic script is implemented; an actual load run remains to be completed.
 - Exercise the full cross-service demo path for key issuance, traffic policy, backend failure/recovery, and request inspection against the running Compose stack.
 - Finish security review, setup/deployment documentation, k6 load suite, and CI checks for the final architecture.

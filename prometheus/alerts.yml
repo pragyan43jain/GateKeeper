@@ -1,0 +1,31 @@
+groups:
+  - name: gatekeeper
+    rules:
+      - alert: GateKeeperUnavailable
+        expr: up{job="gatekeeper"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Gateway metrics endpoint is unreachable
+      - alert: GateKeeperHighErrorRate
+        expr: sum(rate(gateway_requests_total{code=~"5.."}[5m])) / clamp_min(sum(rate(gateway_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Gateway server errors exceed five percent
+      - alert: GateKeeperBackendUnhealthy
+        expr: gateway_backend_health_status == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A gateway backend remains unhealthy
+      - alert: GateKeeperRedisErrors
+        expr: increase(gateway_rate_limit_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Gateway cannot reliably reach its rate limiter

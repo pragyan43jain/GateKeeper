@@ -2566,6 +2566,11 @@ func main() {
 
 	maxLogEntries := getEnvInt("MAX_LOG_ENTRIES", 500)
 	logger := NewRequestLogger(maxLogEntries)
+	stopHistory, err := startRequestHistory(NewManagementStore(managementDB), logger, getEnv("GATEWAY_INSTANCE_ID", "default"))
+	if err != nil {
+		log.Fatalf("request history restore failed: %v", err)
+	}
+	defer stopHistory()
 
 	gwHandler := newGatewayHandlerWithOptions(
 		apiKey,
