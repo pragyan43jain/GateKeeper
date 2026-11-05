@@ -35,6 +35,7 @@ export function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('overview')
   const [principal, setPrincipal] = useState<DashboardPrincipal | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
+  const [sessionError, setSessionError] = useState('')
   const managementKey = principal ? '__session__' : ''
 
   // Telemetry state
@@ -215,7 +216,13 @@ export function App() {
         onSelectTab={setCurrentTab}
         health={health}
         principal={principal}
-        onLogout={() => { void logoutDashboard().finally(() => setPrincipal(null)) }}
+        onLogout={() => {
+          void logoutDashboard().then(() => {
+            setPrincipal(null)
+            setApiKey('')
+            setSessionError('')
+          }).catch(() => setSessionError('Sign out failed. Your session is still active; please try again.'))
+        }}
       />
 
       {/* Main Content Area */}
@@ -232,6 +239,7 @@ export function App() {
 
         <main key={currentTab} className="flex-1 overflow-y-auto p-6 min-w-0">
           <div className="content-container max-w-7xl mx-auto space-y-6">
+            {sessionError && <p role="alert" className="text-sm text-rose-400">{sessionError}</p>}
             {currentTab === 'overview' && (
               <OverviewSection
                 health={health}

@@ -157,8 +157,8 @@ func normalizeDashboardCredentials(email, password string) (string, error) {
 	if err != nil || parsed.Address != email || len(email) > 254 {
 		return "", errors.New("enter a valid email address")
 	}
-	if len(password) < 12 || len(password) > 128 {
-		return "", errors.New("password must contain between 12 and 128 characters")
+	if len(password) < 12 || len(password) > 72 {
+		return "", errors.New("password must contain between 12 and 72 UTF-8 bytes")
 	}
 	return email, nil
 }

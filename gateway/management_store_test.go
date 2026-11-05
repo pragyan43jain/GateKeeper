@@ -193,7 +193,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	privateMetricsRequest.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: adminSession})
 	privateMetrics := httptest.NewRecorder()
 	handler.ServeHTTP(privateMetrics, privateMetricsRequest)
-	if privateMetrics.Code != http.StatusOK || !strings.Contains(privateMetrics.Body.String(), "gateway_requests_total") {
+	if privateMetrics.Code != http.StatusOK || !strings.Contains(privateMetrics.Body.String(), "gateway_circuit_breaker_state") {
 		t.Fatalf("authenticated dashboard metrics status=%d: %s", privateMetrics.Code, privateMetrics.Body.String())
 	}
 	withAdminSession := func(req *http.Request) {

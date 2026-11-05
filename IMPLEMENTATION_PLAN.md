@@ -56,13 +56,13 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - Frontend TypeScript production build, lint, and all 13 service tests pass. The frontend build reports a non-blocking large-chunk warning.
 - `docker compose config --quiet` and `docker compose build gateway` pass.
 - Redis sliding-window boundary, quota, and concurrency tests pass against the configured local Redis service.
-- PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all three migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
+- PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all four migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
-## Still incomplete
+## Latest acceptance and remaining work
 
 - Inspector history now checkpoints to PostgreSQL every two seconds and restores its bounded ring on startup; restart retention and ordering pass PostgreSQL integration tests.
 - OpenTelemetry OTLP export and parent-context propagation pass a collector integration test. Four Prometheus alert rules pass promtool validation. External alert delivery still requires an operator-configured receiver.
-- The k6 traffic script is implemented; an actual load run remains to be completed.
-- Exercise the full cross-service demo path for key issuance, traffic policy, backend failure/recovery, and request inspection against the running Compose stack.
-- Finish security review, setup/deployment documentation, k6 load suite, and CI checks for the final architecture.
+- The isolated Compose acceptance and k6 runs pass; measurements and limits are recorded in scripts/LOAD_TESTING.md.
+- Verified key lifecycle, two-backend distribution, throttling, Inspector correlation, protected metrics, logout, and active backend failure/recovery through the isolated Compose ingress.
+- Remaining product gaps include configuration synchronization across replicas, burst controls, configurable retry policies, backend health history, and a complete final acceptance review. The full original product vision is not yet complete.

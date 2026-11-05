@@ -64,10 +64,10 @@ export function SettingsSection({ apiKey, principal }: SettingsSectionProps) {
     <form onSubmit={createUser} className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
       <h2 className="font-semibold">Add dashboard account</h2><div className="mt-4 grid gap-3 md:grid-cols-4">
         <input required type="email" placeholder="Email address" value={email} onChange={(event) => setEmail(event.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
-        <input required type="password" minLength={12} maxLength={128} autoComplete="new-password" placeholder="Temporary password (12+ chars)" value={password} onChange={(event) => setPassword(event.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
+        <input required type="password" minLength={12} maxLength={72} autoComplete="new-password" placeholder="Password (12+ chars)" value={password} onChange={(event) => setPassword(event.target.value)} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
         <select value={role} onChange={(event) => setRole(event.target.value as DashboardPrincipal['role'])} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"><option value="developer">Developer</option><option value="viewer">Viewer</option><option value="admin">Admin</option></select>
         <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-medium hover:bg-sky-500 disabled:opacity-50"><Plus size={16} />Create account</button>
-      </div><p className="mt-3 text-xs text-zinc-500">Passwords are hashed before storage. Ask the new user to change the temporary password after sign-in.</p>
+      </div><p className="mt-3 text-xs text-zinc-500">Passwords are hashed before storage. Share account credentials through a secure channel.</p>
     </form>
   </div>
 }

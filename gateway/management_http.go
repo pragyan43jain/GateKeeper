@@ -39,7 +39,7 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 				return
 			}
 			if limiter != nil {
-				result, err := limiter.Allow(r.Context(), "management:"+hashAPIKey(principal.ID))
+				result, err := allowManagementRequest(r.Context(), limiter, "management:"+hashAPIKey(principal.ID))
 				if err != nil {
 					http.Error(w, "Service Unavailable: management rate limiter unavailable", http.StatusServiceUnavailable)
 					return

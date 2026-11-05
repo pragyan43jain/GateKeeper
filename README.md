@@ -137,7 +137,7 @@ cp .env.example .env
 
 Generate cryptographically secure secrets and fill in `.env`:
 
-For the dashboard, either set `DASHBOARD_ADMIN_EMAIL` and a 12–128 character
+For the dashboard, either set `DASHBOARD_ADMIN_EMAIL` and a 12–72 byte
 `DASHBOARD_ADMIN_PASSWORD` before the first startup, or leave both blank and use
 the first-run setup screen with `GATEKEEPER_API_KEY`. Once an administrator exists,
 the bootstrap key no longer authenticates management APIs. Keep

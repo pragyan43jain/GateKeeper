@@ -1,10 +1,30 @@
 package main
 
 import (
+	"context"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestManagementQuotaIndependentOfConsumerPolicy(t *testing.T) {
+	limiter := &capturingPolicyLimiter{}
+	if _, err := allowManagementRequest(context.Background(), limiter, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if limiter.limit != 120 {
+		t.Fatalf("management limit = %d, want 120", limiter.limit)
+	}
+}
+
+func TestDashboardPasswordRejectsBcryptOverflow(t *testing.T) {
+	if _, err := normalizeDashboardCredentials("admin@example.test", strings.Repeat("a", 73)); err == nil {
+		t.Fatal("bcrypt-incompatible password accepted")
+	}
+	if _, err := normalizeDashboardCredentials("admin@example.test", strings.Repeat("a", 72)); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestDashboardPasswordHashAndCredentialValidation(t *testing.T) {
 	password := "correct-horse-battery-staple"

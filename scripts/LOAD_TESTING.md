@@ -21,3 +21,14 @@ Prometheus loads `prometheus/alerts.yml`. Rules cover unreachable gateways,
 unhealthy backends, Redis errors, and sustained server error rates. They are
 visible in Prometheus; notification delivery requires an operator-configured
 Alertmanager and receiver. No external notifications are configured automatically.
+
+## Recorded local acceptance run
+
+An isolated Compose stack passed `scripts/acceptance.py` through Caddy: dashboard
+sessions, key lifecycle, round-robin distribution over two upstreams, quota
+rejection, request correlation/search, protected metrics, and logout.
+Backend shutdown and restoration were observed as unhealthy and healthy states.
+A ten-second k6 run with five users completed 485 requests: 10 served and 475
+explicitly throttled, zero unexpected responses, 100% custom checks, and 3.84 ms
+P95 response duration. This primarily measures the rejection path and is not a
+backend throughput benchmark. Repeat on the target deployment for meaningful sizing.

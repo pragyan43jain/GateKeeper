@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
 	mathrand "math/rand"
 	"net/http"
@@ -1499,7 +1500,7 @@ func NewGatewayMetrics(reg *prometheus.Registry) *GatewayMetrics {
 func (m *GatewayMetrics) InstrumentHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Do not count the /metrics scrape itself in application request metrics
-		if r.URL.Path == "/metrics" {
+		if r.URL.Path == "/metrics" || r.URL.Path == "/health" || reservedManagementPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1698,7 +1699,7 @@ func requestInspectorMiddleware(logger *RequestLogger, next http.Handler) http.H
 		next.ServeHTTP(srw, r)
 
 		// Do not record internal telemetry polls to avoid flooding the bounded buffer
-		if r.URL.Path == "/api/requests" || r.URL.Path == "/api/requests/" || r.URL.Path == "/metrics" {
+		if r.URL.Path == "/metrics" || r.URL.Path == "/health" || reservedManagementPath(r.URL.Path) {
 			return
 		}
 
@@ -1714,6 +1715,9 @@ func requestInspectorMiddleware(logger *RequestLogger, next http.Handler) http.H
 		}
 
 		failureCategory := determineFailureCategory(srw.statusCode)
+		slog.Info("gateway_request", "request_id", reqID, "method", r.Method,
+			"status", srw.statusCode, "duration_ms", duration, "backend", backend,
+			"failure_category", failureCategory)
 
 		if logger != nil {
 			logger.Record(RequestLogEntry{
@@ -1983,7 +1987,7 @@ func newGatewayHandlerWithOptions(apiKey string, proxy http.Handler, limiter Rat
 			return
 		}
 		if limiter != nil {
-			result, err := limiter.Allow(r.Context(), "management-metrics:"+hashAPIKey(identity))
+			result, err := allowManagementRequest(r.Context(), limiter, "management-metrics:"+hashAPIKey(identity))
 			if err != nil {
 				http.Error(w, "Metrics rate limiter unavailable", http.StatusServiceUnavailable)
 				return
@@ -2381,6 +2385,7 @@ func applyBackendWeights(pool *BackendPool, raw string) error {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	traceShutdown, err := initializeTracing(context.Background())
 	if err != nil {
 		log.Fatalf("tracing initialization failed: %v", err)

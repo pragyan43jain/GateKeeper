@@ -149,7 +149,7 @@ export function APIKeysSection({ apiKey, onApiKeyChange }: APIKeysSectionProps) 
         <Shield className="h-4 w-4 text-emerald-400" />
         <span className="text-sm text-zinc-300">Management access enabled</span>
         <span className="rounded bg-zinc-950 px-2 py-1 font-mono text-xs text-zinc-500">key retained in memory only</span>
-        <button onClick={() => { onApiKeyChange(''); setOneTimeSecret(null) }} className="ml-auto text-xs text-zinc-400 hover:text-white">Disconnect</button>
+        {apiKey !== '__session__' && <button onClick={() => { onApiKeyChange(''); setOneTimeSecret(null) }} className="ml-auto text-xs text-zinc-400 hover:text-white">Disconnect</button>}
       </div>
 
       {error && <div role="alert" className="flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-300"><AlertTriangle className="h-4 w-4 shrink-0" />{error}</div>}

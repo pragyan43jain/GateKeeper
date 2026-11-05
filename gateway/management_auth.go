@@ -53,6 +53,13 @@ func compareDashboardPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 }
 
+func allowManagementRequest(ctx context.Context, limiter RateLimiter, identity string) (RateLimitResult, error) {
+	if configurable, ok := limiter.(PolicyRateLimiter); ok {
+		return configurable.AllowWithPolicy(ctx, identity, 120, time.Minute)
+	}
+	return limiter.Allow(ctx, identity)
+}
+
 func (a *ManagementAuth) Authenticate(r *http.Request) (ManagementPrincipal, error) {
 	if a == nil || a.store == nil {
 		return ManagementPrincipal{}, errors.New("management authentication is unavailable")

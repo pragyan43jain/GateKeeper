@@ -403,7 +403,8 @@ func TestMetrics_EndpointAccessibleWithoutAuth(t *testing.T) {
 	handler, _ := setupTestGatewayWithMetrics(t, mockLimiter, metrics)
 
 	// Send an initial request so vector metrics have observed samples
-	reqInit := httptest.NewRequest(http.MethodGet, "/health", nil)
+	reqInit := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	reqInit.Header.Set("X-API-Key", testAPIKey)
 	rrInit := httptest.NewRecorder()
 	handler.ServeHTTP(rrInit, reqInit)
 
@@ -502,8 +503,8 @@ func TestMetrics_RequestCountingAndLatency(t *testing.T) {
 
 	body := rrM.Body.String()
 
-	// 2 successful 200 requests (one /api/students, one /health)
-	if !strings.Contains(body, `gateway_requests_total{code="200",method="GET"} 2`) {
+	// Only the application request counts; the health probe is excluded.
+	if !strings.Contains(body, `gateway_requests_total{code="200",method="GET"} 1`) {
 		t.Errorf("expected gateway_requests_total{code=\"200\",method=\"GET\"} 2, got:\n%s", body)
 	}
 	// 1 unauthorized 401 request
@@ -511,8 +512,8 @@ func TestMetrics_RequestCountingAndLatency(t *testing.T) {
 		t.Errorf("expected gateway_requests_total{code=\"401\",method=\"GET\"} 1, got:\n%s", body)
 	}
 	// Latency histogram samples
-	if !strings.Contains(body, `gateway_request_duration_seconds_count{code="200",method="GET"} 2`) {
-		t.Errorf("expected duration count 2 for code 200, got:\n%s", body)
+	if !strings.Contains(body, `gateway_request_duration_seconds_count{code="200",method="GET"} 1`) {
+		t.Errorf("expected duration count 1 for code 200, got:\n%s", body)
 	}
 	if !strings.Contains(body, `gateway_request_duration_seconds_count{code="401",method="GET"} 1`) {
 		t.Errorf("expected duration count 1 for code 401, got:\n%s", body)
