@@ -126,7 +126,7 @@ const TECHS = [
   {
     name: "Redis",
     version: "7",
-    desc: "Atomic fixed-window rate limiting with Lua.",
+    desc: "Atomic Redis sliding-window rate limiting with Lua.",
     icon: Database,
   },
   {

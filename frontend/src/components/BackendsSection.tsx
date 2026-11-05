@@ -1,40 +1,152 @@
-import React from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   Server,
   ShieldCheck,
   ShieldAlert,
-  Zap,
   RotateCcw,
   CheckCircle2,
+  AlertTriangle,
+  HeartPulse,
+  Clock,
   Info,
+  Plus,
+  Trash2,
+  Wrench,
 } from 'lucide-react'
-import type { BackendNodeStatus } from '../types'
+import type { BackendNodeStatus, ManagedBackend } from '../types'
+import { LoadBalancingConfigSection } from './LoadBalancingConfigSection'
+import { createManagedBackend, deleteManagedBackend, fetchManagedBackends, updateManagedBackend } from '../services/api'
 
 interface BackendsSectionProps {
   backends: BackendNodeStatus[]
   lastScraped: string
+  apiKey: string
+  onApiKeyChange: (key: string) => void
 }
 
-export const BackendsSection: React.FC<BackendsSectionProps> = ({ backends, lastScraped }) => {
+export const BackendsSection: React.FC<BackendsSectionProps> = ({ backends, lastScraped, apiKey, onApiKeyChange }) => {
+  const configuredStrategy = backends.find((backend) => backend.strategy)?.strategy
+  const strategyLabel = configuredStrategy?.replaceAll('_', ' ') || 'configured strategy'
+  const [managedBackends, setManagedBackends] = useState<ManagedBackend[]>([])
+  const [draft, setDraft] = useState({ name: '', url: '', weight: '1', healthPath: '/health' })
+  const [managementError, setManagementError] = useState('')
+  const [managementBusy, setManagementBusy] = useState(false)
+  const refreshManaged = useCallback(async () => {
+    if (!apiKey.trim()) {
+      setManagedBackends([])
+      return
+    }
+    try {
+      setManagedBackends(await fetchManagedBackends(apiKey))
+      setManagementError('')
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Unable to load backend configuration.')
+    }
+  }, [apiKey])
+  // oxlint-disable-next-line react/set-state-in-effect
+  useEffect(() => { void refreshManaged() }, [refreshManaged])
+
+  const addBackend = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!apiKey.trim()) return
+    setManagementBusy(true)
+    setManagementError('')
+    try {
+      await createManagedBackend(apiKey, {
+        name: draft.name,
+        url: draft.url,
+        weight: Number(draft.weight),
+        enabled: true,
+        maintenance: false,
+        healthPath: draft.healthPath,
+      })
+      setDraft({ name: '', url: '', weight: '1', healthPath: '/health' })
+      await refreshManaged()
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Unable to register backend.')
+    } finally {
+      setManagementBusy(false)
+    }
+  }
+
+  const saveBackend = async (backend: ManagedBackend, changes: Partial<ManagedBackend>) => {
+    setManagementBusy(true)
+    setManagementError('')
+    try {
+      await updateManagedBackend(apiKey, { ...backend, ...changes })
+      await refreshManaged()
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Unable to update backend.')
+    } finally {
+      setManagementBusy(false)
+    }
+  }
+
+  const removeBackend = async (backend: ManagedBackend) => {
+    if (!window.confirm(`Remove ${backend.name}? Routes may prevent removing an assigned backend.`)) return
+    setManagementBusy(true)
+    setManagementError('')
+    try {
+      await deleteManagedBackend(apiKey, backend.configId)
+      await refreshManaged()
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Unable to remove backend.')
+    } finally {
+      setManagementBusy(false)
+    }
+  }
   return (
     <div className="space-y-6">
+      <LoadBalancingConfigSection apiKey={apiKey} onApiKeyChange={onApiKeyChange} />
+      <section className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100"><Wrench size={16} className="text-indigo-400" />Backend configuration</div>
+        {!apiKey.trim() && <p className="text-xs text-zinc-400">Connect the administrator key above to add, remove, or maintain upstream nodes.</p>}
+        {managementError && <p role="alert" className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-3 text-xs text-rose-300">{managementError}</p>}
+        {apiKey.trim() && <>
+          <form onSubmit={addBackend} className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_2fr_100px_1fr_auto]">
+            <input aria-label="Backend name" required maxLength={100} value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Name" className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
+            <input aria-label="Backend URL" required type="url" value={draft.url} onChange={(e) => setDraft({ ...draft, url: e.target.value })} placeholder="https://api.example.com" className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
+            <input aria-label="Backend weight" required type="number" min={1} max={1000} value={draft.weight} onChange={(e) => setDraft({ ...draft, weight: e.target.value })} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
+            <input aria-label="Health check path" required value={draft.healthPath} onChange={(e) => setDraft({ ...draft, healthPath: e.target.value })} placeholder="/health" className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm" />
+            <button type="submit" disabled={managementBusy} className="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"><Plus size={15} />Add</button>
+          </form>
+          <div className="divide-y divide-zinc-800">
+            {managedBackends.map((backend) => (
+              <div key={backend.configId} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div className="min-w-[220px]">
+                  <p className="text-sm font-medium text-zinc-200">{backend.name} <span className="ml-2 text-xs text-zinc-500">weight {backend.weight}</span></p>
+                  <p className="break-all font-mono text-xs text-zinc-500">{backend.url}{backend.healthPath}</p>
+                  <p className="mt-1 text-[11px] uppercase tracking-wide text-zinc-500">{backend.enabled ? backend.maintenance ? 'Maintenance' : backend.healthStatus || 'Starting checks' : 'Disabled'}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button type="button" disabled={managementBusy || !apiKey.trim()} onClick={() => void saveBackend(backend, { maintenance: !backend.maintenance })} className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+                    {backend.maintenance ? 'Resume traffic' : 'Maintenance'}
+                  </button>
+                  <button type="button" disabled={managementBusy || !apiKey.trim()} onClick={() => void removeBackend(backend)} aria-label={`Remove ${backend.name}`} className="rounded-lg border border-rose-900/50 p-2 text-rose-300 hover:bg-rose-950/40 disabled:opacity-50"><Trash2 size={15} /></button>
+                </div>
+              </div>
+            ))}
+            {!managedBackends.length && <p className="py-4 text-sm text-zinc-500">No persisted backend records are available.</p>}
+          </div>
+        </>}
+      </section>
       {/* Overview header banner */}
       <div className="p-5 rounded-xl bg-zinc-900 border border-zinc-800 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <Server className="w-4 h-4 text-indigo-400" />
-            Upstream Backend Nodes
+            Upstream Backend Nodes & Health Management
           </h2>
           <p className="text-xs text-zinc-400 mt-0.5">
-            Round-robin load balancing pool with independent per-backend circuit breakers.
+            Health-aware load balancing pool with automated probes and per-upstream circuit breakers.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs font-mono">
           <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">
-            Pool Strategy: <strong className="text-indigo-400">Round-Robin</strong>
+            Strategy: <strong className="text-indigo-400">{configuredStrategy?.replaceAll('_', ' ') || 'Unavailable'}</strong>
           </span>
           <span className="px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">
-            Active Nodes: <strong className="text-emerald-400">{backends.length}</strong>
+            Pool Nodes: <strong className="text-emerald-400">{backends.length}</strong>
           </span>
         </div>
       </div>
@@ -45,6 +157,11 @@ export const BackendsSection: React.FC<BackendsSectionProps> = ({ backends, last
           const isClosed = backend.state === 'closed'
           const isHalfOpen = backend.state === 'half-open'
           const isOpen = backend.state === 'open'
+
+          const healthState = backend.healthStatus || 'healthy'
+          const isHealthHealthy = healthState === 'healthy'
+          const isHealthRecovering = healthState === 'recovering'
+          const isHealthUnhealthy = healthState === 'unhealthy'
 
           return (
             <div
@@ -57,9 +174,9 @@ export const BackendsSection: React.FC<BackendsSectionProps> = ({ backends, last
                   <div className="flex items-center gap-2.5">
                     <div
                       className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
-                        isClosed
+                        isHealthHealthy && isClosed
                           ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                          : isHalfOpen
+                          : isHealthRecovering || isHalfOpen
                           ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
                           : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
                       }`}
@@ -76,130 +193,191 @@ export const BackendsSection: React.FC<BackendsSectionProps> = ({ backends, last
                     </div>
                   </div>
 
-                  {/* Status Badge */}
-                  <div
-                    className={`px-2.5 py-1 rounded-full text-xs font-mono font-medium flex items-center gap-1.5 border ${
-                      isClosed
-                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                        : isHalfOpen
-                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                        : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
-                    }`}
-                  >
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        isClosed
-                          ? 'bg-emerald-400'
-                          : isHalfOpen
-                          ? 'bg-amber-400 animate-ping'
-                          : 'bg-rose-400'
+                  {/* Dual Badges: Health & Circuit Breaker */}
+                  <div className="flex items-center gap-2">
+                    {/* Active Health Status Badge */}
+                    <div
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono font-medium flex items-center gap-1.5 border ${
+                        isHealthHealthy
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                          : isHealthRecovering
+                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                          : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
                       }`}
-                    />
-                    {backend.state.toUpperCase()}
+                    >
+                      <span
+                        className={`w-1.5 h-1.5 rounded-full ${
+                          isHealthHealthy
+                            ? 'bg-emerald-400'
+                            : isHealthRecovering
+                            ? 'bg-amber-400 animate-ping'
+                            : 'bg-rose-400 animate-pulse'
+                        }`}
+                      />
+                      <span>HEALTH: {healthState.toUpperCase()}</span>
+                    </div>
+
+                    {/* Circuit Breaker Status Badge */}
+                    <div
+                      className={`px-2.5 py-1 rounded-full text-xs font-mono font-medium flex items-center gap-1.5 border ${
+                        isClosed
+                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                          : isHalfOpen
+                          ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                          : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                      }`}
+                    >
+                      <span>CB: {backend.state.toUpperCase()}</span>
+                    </div>
                   </div>
                 </div>
 
-                {/* State explanation */}
+                {/* State explanation banner */}
                 <div className="my-4 p-3 rounded-lg bg-zinc-950/80 border border-zinc-800 text-xs">
-                  <div className="font-medium text-zinc-300 flex items-center gap-1.5 mb-1">
-                    {isClosed ? (
-                      <>
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                        Circuit Closed (Healthy Traffic)
-                      </>
-                    ) : isHalfOpen ? (
-                      <>
-                        <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                        Circuit Half-Open (Trial Probe)
-                      </>
-                    ) : (
-                      <>
-                        <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-                        Circuit Open (Traffic Blocked / Failing Over)
-                      </>
+                  <div className="font-medium text-zinc-300 flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-1.5">
+                      {isHealthHealthy && isClosed ? (
+                        <>
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Routing Active: Healthy & In-Service</span>
+                        </>
+                      ) : isHealthRecovering || isHalfOpen ? (
+                        <>
+                          <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Recovery In-Progress: Probing Health</span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                          <span>Traffic Excluded: Failing Over</span>
+                        </>
+                      )}
+                    </div>
+
+                    {backend.lastCheckTime && (
+                      <span className="text-[10px] text-zinc-500 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        Checked: {new Date(backend.lastCheckTime).toLocaleTimeString()}
+                      </span>
                     )}
                   </div>
+
                   <p className="text-[11px] text-zinc-400 leading-relaxed">
-                    {isClosed &&
-                      'Operating normally. Upstream transport errors are zero or below threshold. Requests are distributed via round-robin.'}
-                    {isHalfOpen &&
-                      'Cooldown period has elapsed. Gateway is allowing a single probe request to test upstream availability.'}
-                    {isOpen &&
-                      'Threshold exceeded (5 transport failures). Traffic is automatically skipped and routed to healthy alternatives.'}
+                    {isHealthHealthy && isClosed &&
+                      `Active background health checks passing. Consecutive failures at zero. Distributing client traffic via ${strategyLabel}.`}
+                    {isHealthRecovering &&
+                      `Node is in recovery trial (${backend.consecutiveSuccesses || 1} / 2 required successful checks). Traffic will automatically resume once recovery threshold is met.`}
+                    {isHealthUnhealthy &&
+                      `Health check failure threshold met (${backend.consecutiveFailures || 3} consecutive probe failures). Gateway excluded this node from traffic distribution.`}
+                    {!isHealthUnhealthy && isOpen &&
+                      'Circuit breaker opened due to upstream transport errors. Gateway has temporarily skipped this node.'}
                   </p>
+
+                  {/* Failure reason callout if present */}
+                  {backend.lastError && isHealthUnhealthy && (
+                    <div className="mt-2 p-2 rounded bg-rose-500/10 border border-rose-500/20 text-rose-300 text-[11px] flex items-center gap-1.5 font-mono">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                      <span>Failure Diagnostic: {backend.lastError}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Node parameters */}
-                <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5 text-xs font-mono">
                   <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
-                    <span className="text-zinc-400 block text-[10px]">TOTAL TRIPS</span>
-                    <span className="text-zinc-100 font-bold text-sm">{backend.trips}</span>
+                    <span className="text-zinc-500 block text-[10px]">HEALTH STATE</span>
+                    <span
+                      className={`font-bold text-xs ${
+                        isHealthHealthy
+                          ? 'text-emerald-400'
+                          : isHealthRecovering
+                          ? 'text-amber-400'
+                          : 'text-rose-400'
+                      }`}
+                    >
+                      {healthState.toUpperCase()}
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
+                    <span className="text-zinc-500 block text-[10px]">PROBE FAILURES</span>
+                    <span className="text-zinc-100 font-bold text-xs">
+                      {backend.consecutiveFailures || 0} / 3
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
+                    <span className="text-zinc-500 block text-[10px]">RECOVERY CHECKS</span>
+                    <span className="text-zinc-100 font-bold text-xs">
+                      {backend.consecutiveSuccesses || 0} / 2
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
+                    <span className="text-zinc-500 block text-[10px]">BREAKER TRIPS</span>
+                    <span className="text-zinc-100 font-bold text-xs">{backend.trips}</span>
                   </div>
                   <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
-                    <span className="text-zinc-400 block text-[10px]">FAILURE THRESHOLD</span>
-                    <span className="text-zinc-100 font-bold text-sm">5 failures</span>
+                    <span className="text-zinc-500 block text-[10px]">WEIGHT</span>
+                    <span className="text-zinc-100 font-bold text-xs">{backend.weight ?? '—'}</span>
                   </div>
                   <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
-                    <span className="text-zinc-400 block text-[10px]">COOLDOWN PERIOD</span>
-                    <span className="text-zinc-100 font-bold text-sm">10s</span>
-                  </div>
-                  <div className="p-2.5 rounded bg-zinc-950 border border-zinc-800">
-                    <span className="text-zinc-400 block text-[10px]">TRANSPORT</span>
-                    <span className="text-zinc-100 font-bold text-sm">Dedicated Proxy</span>
+                    <span className="text-zinc-500 block text-[10px]">IN FLIGHT</span>
+                    <span className="text-zinc-100 font-bold text-xs">{backend.activeRequests ?? '—'}</span>
                   </div>
                 </div>
               </div>
 
               {/* Card footer */}
               <div className="mt-4 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-                <span>Metric: gateway_backend_circuit_breaker_state</span>
-                <span>Value: {isClosed ? '0' : isOpen ? '1' : '2'}</span>
+                <span>Telemetry: /metrics & /api/backends</span>
+                <span>Last Telemetry Scrape: {lastScraped || 'just now'}</span>
               </div>
             </div>
           )
         })}
       </div>
 
-      {/* Circuit Breaker Architecture & Lifecycle Card */}
+      {/* Health Management Architecture & Lifecycle Card */}
       <div className="p-5 rounded-xl bg-zinc-900 border border-zinc-800 shadow-sm">
         <h3 className="text-sm font-semibold text-zinc-100 flex items-center gap-2 mb-2">
-          <Zap className="w-4 h-4 text-amber-400" />
-          Per-Backend Circuit Breaker Lifecycle & Failover Guarantee
+          <HeartPulse className="w-4 h-4 text-rose-400" />
+          Proactive Backend Health Management & Automatic Failover
         </h3>
         <p className="text-xs text-zinc-400 mb-4 leading-relaxed">
-          GateKeeper isolates circuit breakers per upstream instance. Unlike global circuit breakers,
-          network issues or crashes affecting <code className="text-zinc-300">backend-1</code> will never
-          trip or degrade traffic directed to <code className="text-zinc-300">backend-2</code>.
+          GateKeeper combines continuous out-of-band active health checking with per-backend circuit breakers.
+          If an upstream node crashes or degrades, active probes detect the failure and take the node out of
+          rotation before client requests encounter failures.
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
           <div className="p-3.5 rounded-lg bg-zinc-950 border border-emerald-500/20">
             <div className="font-semibold text-emerald-400 flex items-center gap-1.5 mb-1.5">
               <CheckCircle2 className="w-3.5 h-3.5" />
-              1. Closed (Active)
+              1. Healthy (In-Service)
             </div>
             <p className="text-[11px] text-zinc-400 leading-relaxed">
-              All requests are dispatched round-robin across healthy nodes. Successful responses reset the consecutive failure counter to zero.
+              Periodic probes (every 5s) verify the backend's <code className="text-zinc-300">/health</code> endpoint. Requests use the configured health-aware strategy.
             </p>
           </div>
 
           <div className="p-3.5 rounded-lg bg-zinc-950 border border-rose-500/20">
             <div className="font-semibold text-rose-400 flex items-center gap-1.5 mb-1.5">
               <ShieldAlert className="w-3.5 h-3.5" />
-              2. Open (Failover)
+              2. Unhealthy (Excluded)
             </div>
             <p className="text-[11px] text-zinc-400 leading-relaxed">
-              Triggered after 5 consecutive transport failures. The gateway skips the open node and routes all traffic to healthy peers. If all nodes are open, it returns <strong className="text-rose-300">503 with Retry-After</strong>.
+              After 3 consecutive probe failures, the backend is marked Unhealthy and excluded from traffic distribution without penalizing healthy peers.
             </p>
           </div>
 
           <div className="p-3.5 rounded-lg bg-zinc-950 border border-amber-500/20">
             <div className="font-semibold text-amber-400 flex items-center gap-1.5 mb-1.5">
               <RotateCcw className="w-3.5 h-3.5" />
-              3. Half-Open (Probe)
+              3. Recovering (Trial)
             </div>
             <p className="text-[11px] text-zinc-400 leading-relaxed">
-              After 10 seconds of cooldown, the gateway tests recovery with a single probe request. If it succeeds, the breaker closes; if it fails, it trips back to Open.
+              When an unhealthy node returns 200 OK, it enters Recovering state. Once it achieves 2 consecutive successful checks, it is restored to traffic.
             </p>
           </div>
         </div>
@@ -207,7 +385,7 @@ export const BackendsSection: React.FC<BackendsSectionProps> = ({ backends, last
         <div className="mt-4 p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-400 flex items-start gap-2">
           <Info className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5" />
           <span>
-            <strong>Note on Live Health Checks:</strong> The <code className="text-zinc-300 font-mono">/health</code> endpoint reflects Gateway readiness, while per-backend states are exposed in real-time via <code className="text-zinc-300 font-mono">/metrics</code> under <code className="text-zinc-300 font-mono">gateway_backend_circuit_breaker_state</code>. Last scraped: {lastScraped || 'just now'}.
+            <strong>Failover Guarantee:</strong> If all backends in the pool become unhealthy or circuit-broken, GateKeeper returns a controlled <code className="text-zinc-300 font-mono">503 Service Unavailable</code> with a <code className="text-zinc-300 font-mono">Retry-After: 5</code> header.
           </span>
         </div>
       </div>

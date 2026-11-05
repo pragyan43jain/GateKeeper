@@ -15,6 +15,8 @@ interface RateLimitingSectionProps {
   lastObservedRemaining: string | null
   lastObservedLimit: string | null
   lastObservedRetryAfter: string | null
+  lastObservedReset?: string | null
+  lastObservedDegraded?: boolean
   onNavigate: (tab: TabType) => void
 }
 
@@ -23,6 +25,8 @@ export const RateLimitingSection: React.FC<RateLimitingSectionProps> = ({
   lastObservedRemaining,
   lastObservedLimit,
   lastObservedRetryAfter,
+  lastObservedReset,
+  lastObservedDegraded,
   onNavigate,
 }) => {
   const limitNum = lastObservedLimit ? parseInt(lastObservedLimit, 10) : 10
@@ -41,10 +45,10 @@ export const RateLimitingSection: React.FC<RateLimitingSectionProps> = ({
         <div>
           <h2 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <Gauge className="w-4 h-4 text-amber-400" />
-            Redis Fixed-Window Rate Limiter
+            Redis Sliding-Window Rate Limiter
           </h2>
           <p className="text-xs text-zinc-400 mt-0.5">
-            Distributed fixed-window counter enforced by Redis Lua scripts with SHA-256 key isolation.
+            Distributed event window enforced atomically with Redis Lua and SHA-256 identity isolation.
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs font-mono">
@@ -118,6 +122,16 @@ export const RateLimitingSection: React.FC<RateLimitingSectionProps> = ({
                     <span>Retry-After: {lastObservedRetryAfter}s</span>
                   </div>
                 )}
+
+                {lastObservedDegraded && (
+                  <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 flex items-center justify-between font-mono">
+                    <span className="flex items-center gap-1.5">
+                      <AlertOctagon className="w-4 h-4 text-amber-400" />
+                      Rate Limiter Operating in Degraded Fail-Open Mode
+                    </span>
+                    <span>X-RateLimit-Degraded: true</span>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="my-8 p-6 rounded-lg bg-zinc-950 border border-dashed border-zinc-800 text-center">
@@ -139,9 +153,16 @@ export const RateLimitingSection: React.FC<RateLimitingSectionProps> = ({
             )}
           </div>
 
-          <div className="pt-3 border-t border-zinc-800 text-[11px] text-zinc-400 flex items-center justify-between font-mono">
+          <div className="pt-3 border-t border-zinc-800 text-[11px] text-zinc-400 flex flex-wrap items-center justify-between gap-2 font-mono">
             <span>Response Header: X-RateLimit-Remaining</span>
-            <span className="text-zinc-300">{remainingNum !== null ? remainingNum : 'N/A (Awaiting request)'}</span>
+            <div className="flex items-center gap-3">
+              {lastObservedReset && (
+                <span className="text-zinc-400">
+                  Reset: <strong className="text-zinc-200">{new Date(parseInt(lastObservedReset, 10) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</strong>
+                </span>
+              )}
+              <span className="text-zinc-300">{remainingNum !== null ? remainingNum : 'N/A (Awaiting request)'}</span>
+            </div>
           </div>
         </div>
 

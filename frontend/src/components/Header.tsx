@@ -23,7 +23,7 @@ const tabMeta: Record<TabType, { title: string; subtitle: string }> = {
   },
   ratelimit: {
     title: 'Redis Rate Limiting',
-    subtitle: 'Fixed-window policy inspection, active quota consumption, and 429 rejection tracking.',
+    subtitle: 'Sliding-window policy inspection, active quota consumption, and 429 rejection tracking.',
   },
   metrics: {
     title: 'Observability',
@@ -32,6 +32,26 @@ const tabMeta: Record<TabType, { title: string; subtitle: string }> = {
   playground: {
     title: 'API playground',
     subtitle: 'Dispatch live authenticated HTTP requests to test failover, round-robin, and rate limits.',
+  },
+  inspector: {
+    title: 'API Request Inspector',
+    subtitle: 'Trace, inspect, and debug live HTTP requests traversing the gateway.',
+  },
+  keys: {
+    title: 'API key manager',
+    subtitle: 'Create consumer credentials, assign permissions and quotas, and revoke access.',
+  },
+  audit: {
+    title: 'Audit logs',
+    subtitle: 'Review recent administrative configuration changes.',
+  },
+  routes: {
+    title: 'Route manager',
+    subtitle: 'Map request paths and methods to a selected backend with explicit authentication rules.',
+  },
+  settings: {
+    title: 'Settings & users',
+    subtitle: 'Manage dashboard access and account roles.',
   },
 }
 

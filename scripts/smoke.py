@@ -29,5 +29,5 @@ assert json.loads(body)['students'], 'Missing student response'
 assert headers.get('X-Backend-Id'), 'Missing backend identity'
 assert headers.get('X-RateLimit-Limit'), 'Missing rate limit headers'
 status, _, body = request('/metrics')
-assert status == 200 and 'gateway_requests_total' in body, 'Metrics unavailable'
-print('PASS: health, authentication, upstream response, rate-limit headers, metrics')
+assert status == 403, f'Public metrics endpoint should be blocked: {status}'
+print('PASS: health, authentication, upstream response, rate-limit headers, public metrics blocked')

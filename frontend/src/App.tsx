@@ -6,21 +6,36 @@ import { BackendsSection } from './components/BackendsSection'
 import { RateLimitingSection } from './components/RateLimitingSection'
 import { MetricsSection } from './components/MetricsSection'
 import { PlaygroundSection } from './components/PlaygroundSection'
+import { InspectorSection } from './components/InspectorSection'
+import { APIKeysSection } from './components/APIKeysSection'
+import { TrafficPoliciesSection } from './components/TrafficPoliciesSection'
+import { AuditLogsSection } from './components/AuditLogsSection'
+import { RoutesSection } from './components/RoutesSection'
+import { AuthScreen } from './components/AuthScreen'
+import { SettingsSection } from './components/SettingsSection'
 import {
   fetchGatewayHealth,
   fetchGatewayMetrics,
   fetchPrometheusTimeSeries,
+  fetchBackendDiagnostics,
+  fetchDashboardPrincipal,
+  logoutDashboard,
 } from './services/api'
+import type { DashboardPrincipal } from './services/api'
 import type {
   TabType,
   GatewayHealth,
   GatewayMetricsSummary,
   TimeSeriesPoint,
   PlaygroundResponseData,
+  BackendDiagnostic,
 } from './types'
 
 export function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('overview')
+  const [principal, setPrincipal] = useState<DashboardPrincipal | null>(null)
+  const [authChecked, setAuthChecked] = useState(false)
+  const managementKey = principal ? '__session__' : ''
 
   // Telemetry state
   const [health, setHealth] = useState<GatewayHealth | null>(null)
@@ -32,6 +47,12 @@ export function App() {
 
   // API Playground state (IN-MEMORY ONLY)
   const [apiKey, setApiKey] = useState<string>('')
+
+  useEffect(() => {
+    fetchDashboardPrincipal().then(setPrincipal).catch((err: unknown) => {
+      console.error('Dashboard authentication check failed:', err)
+    }).finally(() => setAuthChecked(true))
+  }, [])
   const [lastPlaygroundResponse, setLastPlaygroundResponse] =
     useState<PlaygroundResponseData | null>(null)
   const [responseHistory, setResponseHistory] = useState<PlaygroundResponseData[]>([])
@@ -64,6 +85,33 @@ export function App() {
 
       setHealth(h)
       if (m) {
+        if (managementKey) {
+          try {
+            const diags: BackendDiagnostic[] = await fetchBackendDiagnostics(managementKey)
+            if (diags && diags.length > 0) {
+              const diagMap = new Map(diags.map((d) => [d.id, d]))
+              m.backends = m.backends.map((b) => {
+                const d = diagMap.get(b.id)
+                if (d) {
+                  return {
+                    ...b,
+                    healthStatus: d.healthStatus,
+                    consecutiveFailures: d.consecutiveFailures,
+                    consecutiveSuccesses: d.consecutiveSuccesses,
+                    lastCheckTime: d.lastCheckTime,
+                    lastError: d.lastError,
+                    weight: d.weight,
+                    activeRequests: d.activeRequests,
+                    strategy: d.strategy,
+                  }
+                }
+                return b
+              })
+            }
+          } catch {
+            // Ignore diagnostic fetch error; basic status from Prometheus remains
+          }
+        }
         setMetrics(m)
         setLastScraped(m.scrapedAt)
 
@@ -131,7 +179,7 @@ export function App() {
       refreshInFlight.current = false
       setIsRefreshing(false)
     }
-  }, [])
+  }, [managementKey])
 
   // Initial load
   useEffect(() => {
@@ -156,6 +204,9 @@ export function App() {
     loadData()
   }
 
+  if (!authChecked) return <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-sm text-zinc-400">Checking dashboard session…</div>
+  if (!principal) return <AuthScreen onAuthenticated={setPrincipal} />
+
   return (
     <div className="console-app flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 antialiased font-sans">
       {/* Sidebar Navigation */}
@@ -163,6 +214,8 @@ export function App() {
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
         health={health}
+        principal={principal}
+        onLogout={() => { void logoutDashboard().finally(() => setPrincipal(null)) }}
       />
 
       {/* Main Content Area */}
@@ -192,17 +245,24 @@ export function App() {
               <BackendsSection
                 backends={metrics?.backends || []}
                 lastScraped={lastScraped}
+                apiKey={managementKey}
+                onApiKeyChange={() => {}}
               />
             )}
 
             {currentTab === 'ratelimit' && (
-              <RateLimitingSection
-                rateLimitRejections={metrics?.rateLimitRejections || 0}
-                lastObservedRemaining={lastPlaygroundResponse?.rateLimitRemaining || null}
-                lastObservedLimit={lastPlaygroundResponse?.rateLimitLimit || null}
-                lastObservedRetryAfter={lastPlaygroundResponse?.retryAfter || null}
-                onNavigate={setCurrentTab}
-              />
+              <div className="space-y-6">
+                <RateLimitingSection
+                  rateLimitRejections={metrics?.rateLimitRejections || 0}
+                  lastObservedRemaining={lastPlaygroundResponse?.rateLimitRemaining || null}
+                  lastObservedLimit={lastPlaygroundResponse?.rateLimitLimit || null}
+                  lastObservedRetryAfter={lastPlaygroundResponse?.retryAfter || null}
+                  lastObservedReset={lastPlaygroundResponse?.rateLimitReset || null}
+                  lastObservedDegraded={lastPlaygroundResponse?.rateLimitDegraded}
+                  onNavigate={setCurrentTab}
+                />
+                <TrafficPoliciesSection apiKey={managementKey} onApiKeyChange={() => {}} />
+              </div>
             )}
 
             {currentTab === 'metrics' && (
@@ -221,6 +281,29 @@ export function App() {
                 apiKey={apiKey}
                 onChangeApiKey={setApiKey}
               />
+            )}
+
+            {currentTab === 'inspector' && (
+              <InspectorSection
+                apiKey={managementKey}
+                onApiKeyChange={() => {}}
+              />
+            )}
+
+            {currentTab === 'keys' && (
+              <APIKeysSection apiKey={managementKey} onApiKeyChange={() => {}} />
+            )}
+
+            {currentTab === 'audit' && (
+              <AuditLogsSection apiKey={managementKey} />
+            )}
+
+            {currentTab === 'routes' && (
+              <RoutesSection apiKey={managementKey} />
+            )}
+
+            {currentTab === 'settings' && (
+              <SettingsSection apiKey={managementKey} principal={principal} />
             )}
           </div>
         </main>

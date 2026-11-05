@@ -1,6 +1,6 @@
 # GateKeeper
 
-GateKeeper is a lightweight, high-performance API Gateway written in Go. It provides API-key authentication, atomic Redis-backed fixed-window rate limiting, round-robin load balancing with independent per-backend circuit breakers, reverse proxying, Prometheus metrics instrumentation, a modern React developer dashboard, and automated TLS termination via Caddy—packaged for turnkey deployment using Docker Compose.
+GateKeeper is an API Gateway and Traffic Management Platform written in Go. It provides API-key authentication, Redis-backed sliding-window rate limiting, selectable health-aware load balancing with independent per-backend circuit breakers, active backend health checks, bounded request inspection, Prometheus metrics, dashboard sessions and account roles, and automated TLS termination via Caddy. PostgreSQL stores management configuration and dashboard identities; Redis stores transient rate-limit state.
 
 ---
 
@@ -21,6 +21,7 @@ flowchart TD
             Backend1["Backend Instance 1 (:8081)<br/>Internal Only"]
             Backend2["Backend Instance 2 (:8081)<br/>Internal Only"]
             Redis[("Redis 7 (:6379)<br/>Auth Required | Internal Only")]
+            Postgres[("PostgreSQL 17 (:5432)<br/>Management Data | Internal Only")]
             Prometheus["Prometheus (:9090)<br/>Internal Only"]
             Grafana["Grafana (:3000)<br/>Internal Only"]
         end
@@ -29,20 +30,22 @@ flowchart TD
     Client -->|"HTTPS (443) / HTTP (80)"| Caddy
     Caddy -->|"1. Static Assets (/*)"| Frontend
     Caddy -->|"2. API Requests (/api/*)"| Gateway
-    Caddy -->|"3. Health (/health) & Metrics (/metrics)"| Gateway
+    Caddy -->|"3. Public Health (/health)"| Gateway
     Caddy -->|"4. Scoped Telemetry (/prometheus/api/v1/query*)"| Prometheus
     Caddy -.->|"5. Optional Subdomain"| Grafana
 
     Gateway -->|"Verify X-API-Key"| Gateway
     Gateway -->|"Atomic Lua Rate Check"| Redis
+    Gateway -->|"Management Schema"| Postgres
     Gateway -->|"Round-Robin & Circuit Breaker"| Backend1
     Gateway -->|"Round-Robin & Circuit Breaker"| Backend2
 
-    Prometheus -->|"Scrape /metrics (every 5s)"| Gateway
+    Prometheus -.->|"Internal scrape /metrics (every 5s)"| Gateway
     Grafana -->|"Query PromQL via Provisioned Datasource"| Prometheus
 
     subgraph Volumes ["Persistent Named Volumes"]
         RedisVol[("redis-data")] --- Redis
+        PostgresVol[("postgres-data")] --- Postgres
         PromVol[("prometheus-data")] --- Prometheus
         GrafVol[("grafana-data")] --- Grafana
         CaddyData[("caddy-data")] --- Caddy
@@ -55,16 +58,21 @@ flowchart TD
 ## Features
 
 - **Automated HTTPS & Edge Routing**: Caddy edge reverse proxy with automatic Let's Encrypt TLS certificate provisioning, HTTP-to-HTTPS redirection, and modern HTTP/2 + HTTP/3 support.
-- **API-Key Authentication**: Constant-time verification (`subtle.ConstantTimeCompare`) of the `X-API-Key` header on all `/api/*` routes.
-- **Atomic Redis Rate Limiting**: Fixed/fixed-window rate limiting powered by a single-threaded Redis Lua script to prevent concurrency race conditions. Supports password-authenticated Redis connections.
-- **Round-Robin Load Balancing**: Thread-safe round-robin routing across multiple upstream backend instances (`backend-1`, `backend-2`).
+- **API-Key Authentication**: Constant-time verification of consumer `X-API-Key` credentials on routed API traffic. Dashboard management endpoints require a named dashboard session.
+- **API Key Management**: PostgreSQL-backed consumer applications and API keys, hashed secret storage, expiry, read/write permissions, dynamically editable per-key quotas, usage counts, and revocation through protected management endpoints.
+- **Atomic Redis Rate Limiting**: Sliding-window rate limiting powered by a Redis Lua script and sorted sets. Redis server time coordinates gateway instances; rejected requests do not extend a consumer's active window.
+- **Health-Aware Load Balancing**: Select round robin (default), weighted round robin, least in-flight requests, or random distribution. Unhealthy and circuit-open backends are excluded when healthy alternatives exist. `BACKEND_WEIGHTS` configures initial weights in the same order as `BACKEND_URLS`; authorized administrators can persist and change strategy and weights from the dashboard.
+- **Persistent Upstream and Route Management**: Bootstrap upstreams from `BACKEND_URLS`, then manage backend membership, weights, maintenance mode, health paths, route prefixes, methods, and authentication policy through protected APIs and dashboard pages. Route changes publish atomically and take effect without restarting the gateway.
 - **Independent Circuit Breakers**: Dedicated per-backend circuit breakers with isolated failure thresholds, cooldown intervals, and half-open trial probes. Automatically skips failing backends and fast-fails with `503 Service Unavailable` and `Retry-After` if all backends are down.
 - **Configurable Upstream Timeouts**: Gateway enforces bounded upstream `ResponseHeaderTimeout` (`BACKEND_TIMEOUT`, default: 10s). Slow or deadlocked backends are terminated with `502 Bad Gateway` and counted toward circuit breaker failure thresholds rather than hanging client connections indefinitely.
 - **Credential Privacy**: Derives a deterministic SHA-256 hash from incoming API keys. Raw keys are never stored in Redis, printed to logs, or exposed.
 - **Fail-Safe Design**: Returns `HTTP 503 Service Unavailable` if Redis is unreachable—never silently bypassing rate limits.
 - **Interactive Monitoring Dashboard**: React + TypeScript + Vite single-page application served via a multi-stage Caddy container, featuring real-time telemetry, backend circuit breaker states, and an interactive API playground.
-- **Scoped Telemetry Ingress**: Prometheus query access through the edge proxy is strictly restricted to query endpoints (`/prometheus/api/v1/query` and `/query_range`) used by the dashboard. Administrative and destructive Prometheus endpoints are blocked with `403 Forbidden`.
+- **Scoped Telemetry Ingress**: Prometheus query access through the edge proxy is strictly restricted to query endpoints (`/prometheus/api/v1/query` and `/query_range`) used by the dashboard. Public `/metrics` and administrative Prometheus endpoints are blocked with `403 Forbidden`; Prometheus scrapes the gateway internally.
+- **Restricted Cross-Origin Access**: Same-origin access is the default. Set `CORS_ALLOWED_ORIGINS` to explicit origins when hosting the dashboard separately; wildcard access is an explicit opt-in.
 - **Internal Service Isolation**: Upstream backends, Redis, Prometheus, Grafana, and the gateway do not publish ports to the public host interface. All public traffic must enter through Caddy on ports 80 and 443.
+- **Dashboard Access Control**: First-run setup uses the bootstrap `GATEKEEPER_API_KEY` once to create an administrator. Thereafter, management APIs require opaque PostgreSQL-backed session cookies; user passwords use bcrypt and stored session tokens are hashed. Admin, developer, and viewer roles restrict management access, and audit events record the named account.
+- **PostgreSQL Management Layer**: Versioned startup migrations create dashboard accounts and sessions, applications, API keys, backends, routes, rate-limit policies, audit events, and settings. Consumer secrets are stored as SHA-256 hashes and returned once. Per-key and per-route limits and permissions are enforced by the gateway; Redis holds the sliding-window event state.
 
 ---
 
@@ -76,7 +84,8 @@ flowchart TD
 | **API Gateway** | Go 1.26 | Standard library `net/http`, reverse proxy, load balancer, circuit breakers |
 | **Dashboard** | React 19 + TypeScript + Vite + Tailwind | Modern real-time gateway developer dashboard |
 | **Cache / Token Store** | Redis 7 (`redis:7-alpine`) | In-memory token counter with AOF persistence and password auth |
-| **Metrics Collection** | Prometheus (`prom/prometheus:latest`) | Time-series metrics collection and scraping |
+| **Management Database** | PostgreSQL 17 (`postgres:17-alpine`) | Persistent management schema and migration history; no rate-limit counters |
+| **Metrics Collection** | Prometheus (`prom/prometheus:latest`) | Internal gateway scrape with scoped dashboard queries |
 | **Visualization** | Grafana (`grafana/grafana:latest`) | Analytics dashboard provisioned with Prometheus data source |
 | **Containerization** | Docker & Docker Compose v2 | Multi-container orchestrated deployment with logging limits |
 
@@ -128,15 +137,23 @@ cp .env.example .env
 
 Generate cryptographically secure secrets and fill in `.env`:
 
+For the dashboard, either set `DASHBOARD_ADMIN_EMAIL` and a 12–128 character
+`DASHBOARD_ADMIN_PASSWORD` before the first startup, or leave both blank and use
+the first-run setup screen with `GATEKEEPER_API_KEY`. Once an administrator exists,
+the bootstrap key no longer authenticates management APIs. Keep
+`DASHBOARD_SESSION_COOKIE_SECURE=true` when serving the dashboard over HTTPS.
+
 ```bash
 # Generate secrets
 API_KEY=$(openssl rand -hex 24)
 REDIS_PW=$(openssl rand -hex 24)
+POSTGRES_PW=$(openssl rand -hex 24)
 GRAFANA_PW=$(openssl rand -hex 24)
 
 # Populate .env
 sed -i "s/your-secure-gateway-api-key-here/$API_KEY/" .env
 sed -i "s/your-secure-redis-password-here/$REDIS_PW/" .env
+sed -i "s/your-secure-postgres-password-here/$POSTGRES_PW/" .env
 sed -i "s/your-secure-grafana-password-here/$GRAFANA_PW/" .env
 sed -i "s/DOMAIN_NAME=localhost/DOMAIN_NAME=gatekeeper.yourdomain.com/" .env
 sed -i "s/ACME_EMAIL=admin@example.com/ACME_EMAIL=your-email@yourdomain.com/" .env
@@ -161,7 +178,7 @@ docker compose up -d --build
    ```bash
    docker compose ps
    ```
-   All 8 containers (`caddy`, `frontend`, `gateway`, `backend-1`, `backend-2`, `redis`, `prometheus`, `grafana`) should show status `Up (healthy)`.
+   All 9 containers (`caddy`, `frontend`, `gateway`, `backend-1`, `backend-2`, `redis`, `postgres`, `prometheus`, `grafana`) should show status `Up (healthy)`.
 
 2. **Verify Public Health Endpoint (over HTTPS)**:
    ```bash
@@ -187,7 +204,7 @@ docker compose up -d --build
    ```
 
 5. **Verify Rate Limiting**:
-   Send 11 rapid requests with your API key to observe the fixed-window limit:
+   Send 11 rapid requests with your API key to observe the sliding-window limit:
    ```bash
    for i in {1..11}; do
      curl -s -o /dev/null -w "%{http_code}\n" -H "X-API-Key: $KEY" https://gatekeeper.yourdomain.com/api/students
@@ -299,13 +316,21 @@ docker compose up -d --build
 # Stop containers (preserves all volume data)
 docker compose down
 
-# Warning: The following command destroys rate limit history and Prometheus metrics:
+# Warning: the following command destroys rate-limit data, management data, and Prometheus metrics:
 # docker compose down -v
 ```
 
 ---
 
 ## Local Development Workflows
+
+### Load Balancing Configuration
+
+Set `LOAD_BALANCE_STRATEGY` to `round_robin`, `weighted_round_robin`, `least_connections`, or `random`.
+For weighted round robin, set one integer in the range 1–1000 per configured backend, in URL order;
+for example, `BACKEND_WEIGHTS=2,1` gives the first backend twice the weight of the second.
+The `least_connections` strategy chooses the backend with the fewest in-flight proxied requests.
+These environment variables provide the initial settings; persisted dashboard changes override them on subsequent gateway starts. The default strategy remains round robin.
 
 ### Workflow A: Local Ingress Development (Recommended)
 You can run the full containerized stack locally without touching raw host ports:
@@ -349,7 +374,8 @@ go vet ./...
 
 The current implementation scope and validation steps are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 Run `make check` for Go race tests, vet, frontend build, and lint. Redis integration tests
-require Redis on `localhost:6379`; CI provisions it automatically.
+require Redis on `localhost:6379`; CI provisions it automatically. The PostgreSQL migration
+integration test runs when `TEST_DATABASE_URL` points to a disposable PostgreSQL database.
 Run `make up` to build and start the stack, then use `make smoke` with
 `GATEKEEPER_API_KEY` set. For local self-signed Caddy TLS only, set `ALLOW_LOCAL_TLS=1`.
 The backend is a read-only demonstration service; student records are sample data.

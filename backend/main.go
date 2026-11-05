@@ -18,24 +18,42 @@ func newBackendHandler(backendID string) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/students", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Backend-Id", backendID)
+			json.NewEncoder(w).Encode(map[string]any{
+				"status":     "healthy",
+				"backend_id": backendID,
+			})
+		case http.MethodHead:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Backend-Id", backendID)
+			w.WriteHeader(http.StatusOK)
+		default:
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Backend-Id", backendID)
-		if r.Method == http.MethodHead {
+	})
+	mux.HandleFunc("/api/students", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Backend-Id", backendID)
+			json.NewEncoder(w).Encode(map[string]any{
+				"backend_id": backendID,
+				"message":    "Hello from backend",
+				"students":   []string{"Arjun", "Priya", "Rahul"},
+			})
+		case http.MethodHead:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Backend-Id", backendID)
 			w.WriteHeader(http.StatusOK)
-			return
+		default:
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"backend_id": backendID,
-			"message":    "Hello from backend",
-			"students":   []string{"Arjun", "Priya", "Rahul"},
-		})
 	})
 
 	return mux

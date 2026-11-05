@@ -276,11 +276,12 @@ func TestRateLimiter_Concurrency(t *testing.T) {
 	allowedCount := 0
 	rateLimitedCount := 0
 	for _, code := range statusCodes {
-		if code == http.StatusOK {
+		switch code {
+		case http.StatusOK:
 			allowedCount++
-		} else if code == http.StatusTooManyRequests {
+		case http.StatusTooManyRequests:
 			rateLimitedCount++
-		} else {
+		default:
 			t.Fatalf("unexpected status code during concurrency test: %d", code)
 		}
 	}
@@ -290,6 +291,29 @@ func TestRateLimiter_Concurrency(t *testing.T) {
 	}
 	if rateLimitedCount != (totalRequests - 10) {
 		t.Fatalf("expected %d requests rate limited, got %d", totalRequests-10, rateLimitedCount)
+	}
+}
+
+func TestRateLimiterSlidingWindowRetainsRecentTrafficAcrossBoundary(t *testing.T) {
+	rdb, prefix := setupTestRedis(t)
+	limiter := NewRedisRateLimiter(rdb, prefix, 2, 250*time.Millisecond)
+	first, err := limiter.Allow(context.Background(), "sliding-boundary")
+	if err != nil || !first.Allowed {
+		t.Fatalf("first request: result=%+v err=%v", first, err)
+	}
+	time.Sleep(120 * time.Millisecond)
+	second, err := limiter.Allow(context.Background(), "sliding-boundary")
+	if err != nil || !second.Allowed {
+		t.Fatalf("second request: result=%+v err=%v", second, err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	third, err := limiter.Allow(context.Background(), "sliding-boundary")
+	if err != nil || !third.Allowed || third.Remaining != 0 {
+		t.Fatalf("third request after first event aged out: result=%+v err=%v", third, err)
+	}
+	fourth, err := limiter.Allow(context.Background(), "sliding-boundary")
+	if err != nil || fourth.Allowed {
+		t.Fatalf("fourth request should still see the two recent events: result=%+v err=%v", fourth, err)
 	}
 }
 

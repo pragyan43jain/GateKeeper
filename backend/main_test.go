@@ -94,4 +94,49 @@ func TestBackendHandler_BackendID(t *testing.T) {
 			t.Errorf("expected empty body for HEAD request, got %d bytes: %q", rr.Body.Len(), rr.Body.String())
 		}
 	})
+
+	t.Run("HealthCheckEndpoint", func(t *testing.T) {
+		handler := newBackendHandler("backend-2")
+
+		// 1. GET /health
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for GET /health, got %d", rr.Code)
+		}
+		if got := rr.Header().Get("X-Backend-Id"); got != "backend-2" {
+			t.Errorf("expected X-Backend-Id 'backend-2', got %q", got)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("failed to decode /health JSON: %v", err)
+		}
+		if body["status"] != "healthy" {
+			t.Errorf("expected status 'healthy', got %v", body["status"])
+		}
+		if body["backend_id"] != "backend-2" {
+			t.Errorf("expected backend_id 'backend-2', got %v", body["backend_id"])
+		}
+
+		// 2. HEAD /health
+		headReq := httptest.NewRequest(http.MethodHead, "/health", nil)
+		headRR := httptest.NewRecorder()
+		handler.ServeHTTP(headRR, headReq)
+		if headRR.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for HEAD /health, got %d", headRR.Code)
+		}
+		if headRR.Body.Len() != 0 {
+			t.Errorf("expected empty body for HEAD /health, got %d bytes", headRR.Body.Len())
+		}
+
+		// 3. POST /health -> 405 Method Not Allowed
+		postReq := httptest.NewRequest(http.MethodPost, "/health", nil)
+		postRR := httptest.NewRecorder()
+		handler.ServeHTTP(postRR, postReq)
+		if postRR.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 Method Not Allowed for POST /health, got %d", postRR.Code)
+		}
+	})
 }

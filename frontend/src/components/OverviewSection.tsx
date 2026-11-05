@@ -149,7 +149,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
               {(metrics?.rateLimitRejections ?? 0).toLocaleString()}
             </div>
             <div className="text-xs text-zinc-400 mt-1">
-              Redis fixed-window 429s
+              Redis sliding-window 429s
             </div>
           </div>
           <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">

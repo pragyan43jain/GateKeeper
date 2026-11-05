@@ -234,6 +234,11 @@ export const PlaygroundSection: React.FC<PlaygroundSectionProps> = ({
 
               {lastResponse && (
                 <div className="flex items-center gap-2">
+                  {lastResponse.rateLimitDegraded && (
+                    <span className="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      DEGRADED (FAIL-OPEN)
+                    </span>
+                  )}
                   <span
                     className={`px-2.5 py-1 rounded text-xs font-mono font-bold border ${
                       lastResponse.status === 200
@@ -289,6 +294,11 @@ export const PlaygroundSection: React.FC<PlaygroundSectionProps> = ({
                         ? `${lastResponse.rateLimitRemaining} / ${lastResponse.rateLimitLimit || '10'}`
                         : 'N/A'}
                     </span>
+                    {lastResponse.rateLimitReset && (
+                      <span className="text-[10px] text-zinc-500 block truncate" title={`Reset epoch: ${lastResponse.rateLimitReset}`}>
+                        Reset: {new Date(parseInt(lastResponse.rateLimitReset, 10) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      </span>
+                    )}
                   </div>
 
                   {/* Retry-After Header */}

@@ -12,8 +12,22 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: gatekeeper_test
+          POSTGRES_USER: gatekeeper
+          POSTGRES_PASSWORD: test-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U gatekeeper -d gatekeeper_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
+      - name: Configure test databases
+        run: echo "TEST_DATABASE_URL=postgres://gatekeeper:test-password@localhost:5432/gatekeeper_test?sslmode=disable" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

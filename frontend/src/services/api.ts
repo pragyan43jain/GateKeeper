@@ -2,11 +2,20 @@ import type {
   GatewayHealth,
   GatewayMetricsSummary,
   BackendNodeStatus,
+  BackendDiagnostic,
+  BackendHealthState,
+  RequestLogEntry,
   MetricSample,
   CircuitBreakerState,
   TimeSeriesPoint,
   PlaygroundResponseData,
   NormalizedTarget,
+  ApplicationRecord,
+  APIKeyRecord,
+  LoadBalancingSettings,
+  AuditLogRecord,
+  ManagedBackend,
+  ManagedRoute,
 } from '../types'
 
 /**
@@ -131,17 +140,18 @@ function numToCircuitState(num: number): CircuitBreakerState {
 }
 
 /**
- * Fetches and aggregates Gatekeeper Prometheus metrics from /metrics.
+ * Fetches and aggregates Gatekeeper metrics from the authenticated dashboard endpoint.
  */
 export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
-  const response = await fetch(`${API_BASE}/metrics`, {
+  const response = await fetch(`${API_BASE}/api/metrics`, {
     signal: AbortSignal.timeout(8000),
     method: 'GET',
+    credentials: 'include',
     cache: 'no-store',
   })
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch /metrics: ${response.status} ${response.statusText}`)
+    throw new Error(`Failed to fetch dashboard metrics: ${response.status} ${response.statusText}`)
   }
 
   const text = await response.text()
@@ -155,6 +165,9 @@ export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
 
   const backendStates: Record<string, CircuitBreakerState> = {}
   const backendTrips: Record<string, number> = {}
+  const backendHealthStates: Record<string, BackendHealthState> = {}
+  const backendHealthFailures: Record<string, number> = {}
+  const backendHealthSuccesses: Record<string, number> = {}
 
   for (const s of samples) {
     if (s.name === 'gateway_requests_total') {
@@ -177,6 +190,21 @@ export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
       if (backend) {
         backendTrips[backend] = s.value
       }
+    } else if (s.name === 'gateway_backend_health_status') {
+      const backend = s.labels.backend
+      if (backend) {
+        backendHealthStates[backend] = s.value === 0 ? 'healthy' : s.value === 1 ? 'unhealthy' : 'recovering'
+      }
+    } else if (s.name === 'gateway_backend_health_check_failures_total') {
+      const backend = s.labels.backend
+      if (backend) {
+        backendHealthFailures[backend] = s.value
+      }
+    } else if (s.name === 'gateway_backend_health_check_successes_total') {
+      const backend = s.labels.backend
+      if (backend) {
+        backendHealthSuccesses[backend] = s.value
+      }
     }
   }
 
@@ -189,6 +217,9 @@ export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
     target: id,
     state,
     trips: backendTrips[id] || 0,
+    healthStatus: backendHealthStates[id] || 'healthy',
+    consecutiveFailures: backendHealthFailures[id] || 0,
+    consecutiveSuccesses: backendHealthSuccesses[id] || 0,
   }))
 
   return {
@@ -419,8 +450,11 @@ export async function executePlaygroundRequest(
       body: formattedBody,
       timestamp: new Date().toLocaleTimeString(),
       backendId: resHeaders['x-backend-id'],
+      requestId: resHeaders['x-request-id'],
       rateLimitLimit: resHeaders['x-ratelimit-limit'],
       rateLimitRemaining: resHeaders['x-ratelimit-remaining'],
+      rateLimitReset: resHeaders['x-ratelimit-reset'],
+      rateLimitDegraded: resHeaders['x-ratelimit-degraded'] === 'true',
       retryAfter: resHeaders['retry-after'],
       isSuccess: response.ok,
     }
@@ -439,4 +473,283 @@ export async function executePlaygroundRequest(
   }
 }
 
+/**
+ * Fetches recent request logs from the Gateway Request Inspector (/api/requests).
+ */
+export async function fetchRequestLogs(
+  apiKey: string,
+  options?: {
+    limit?: number
+    status?: number
+    method?: string
+    search?: string
+  }
+): Promise<RequestLogEntry[]> {
+  const params = new URLSearchParams()
+  if (options?.limit) params.set('limit', String(options.limit))
+  if (options?.status) params.set('status', String(options.status))
+  if (options?.method) params.set('method', options.method)
+  if (options?.search) params.set('search', options.search)
 
+  const queryStr = params.toString() ? `?${params.toString()}` : ''
+  const response = await fetch(`${API_BASE}/api/requests${queryStr}`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: {
+      ...(apiKey && apiKey !== '__session__' ? { 'X-API-Key': apiKey } : {}),
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(6000),
+  })
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('Authentication required: Invalid or missing API key')
+    }
+    throw new Error(`Failed to fetch request logs: HTTP ${response.status}`)
+  }
+
+  const data = (await response.json()) as { requests?: RequestLogEntry[] }
+  return data.requests || []
+}
+
+/**
+ * Fetches real-time backend health diagnostics from /api/backends.
+ */
+export async function fetchBackendDiagnostics(apiKey: string): Promise<BackendDiagnostic[]> {
+  const response = await fetch(`${API_BASE}/api/backends`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: {
+      ...(apiKey && apiKey !== '__session__' ? { 'X-API-Key': apiKey } : {}),
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(6000),
+  })
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('Authentication required: Invalid or missing API key')
+    }
+    throw new Error(`Failed to fetch backend diagnostics: HTTP ${response.status}`)
+  }
+
+  const data = (await response.json()) as { backends?: BackendDiagnostic[] }
+  return data.backends || []
+}
+
+async function managementRequest<T>(apiKey: string, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    credentials: 'include',
+    headers: {
+      ...(apiKey && apiKey !== '__session__' ? { 'X-API-Key': apiKey } : {}),
+      Accept: 'application/json',
+      ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+      ...init.headers,
+    },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!response.ok) {
+    const message = response.status === 401
+      ? 'Administrator API key required or invalid'
+      : `Management request failed: HTTP ${response.status}`
+    throw new Error(message)
+  }
+  if (response.status === 204) return undefined as T
+  return (await response.json()) as T
+}
+
+export interface DashboardPrincipal {
+  id: string
+  email: string
+  role: 'admin' | 'developer' | 'viewer'
+}
+
+export interface DashboardUser extends DashboardPrincipal { createdAt: string }
+
+export async function fetchDashboardUsers(apiKey: string): Promise<DashboardUser[]> {
+  const data = await managementRequest<{ users?: DashboardUser[] }>(apiKey, '/api/users')
+  return data.users || []
+}
+
+export async function createDashboardUser(apiKey: string, input: { email: string; password: string; role: DashboardPrincipal['role'] }): Promise<DashboardUser> {
+  return managementRequest<DashboardUser>(apiKey, '/api/users', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export async function updateDashboardUserRole(apiKey: string, id: string, role: DashboardPrincipal['role']): Promise<DashboardUser> {
+  return managementRequest<DashboardUser>(apiKey, `/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ role }) })
+}
+
+export async function deleteDashboardUser(apiKey: string, id: string): Promise<void> {
+  await managementRequest<void>(apiKey, `/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function fetchDashboardPrincipal(): Promise<DashboardPrincipal | null> {
+  const response = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include', cache: 'no-store' })
+  if (response.status === 401) return null
+  if (!response.ok) throw new Error(`Dashboard authentication failed: HTTP ${response.status}`)
+  return (await response.json()) as DashboardPrincipal
+}
+
+export async function dashboardSetupRequired(): Promise<boolean> {
+  const response = await fetch(`${API_BASE}/api/auth/setup`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`Dashboard setup check failed: HTTP ${response.status}`)
+  const data = (await response.json()) as { setupRequired?: boolean }
+  return data.setupRequired === true
+}
+
+export async function loginDashboard(email: string, password: string): Promise<DashboardPrincipal> {
+  return authenticateDashboard('/api/auth/login', { email, password })
+}
+
+export async function setupDashboard(bootstrapKey: string, email: string, password: string): Promise<DashboardPrincipal> {
+  return authenticateDashboard('/api/auth/setup', { email, password }, bootstrapKey)
+}
+
+async function authenticateDashboard(path: string, credentials: { email: string; password: string }, bootstrapKey?: string): Promise<DashboardPrincipal> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json', ...(bootstrapKey ? { 'X-API-Key': bootstrapKey } : {}) },
+    body: JSON.stringify(credentials), cache: 'no-store',
+  })
+  if (!response.ok) throw new Error(response.status === 401 ? 'Invalid credentials or bootstrap key' : `Dashboard authentication failed: HTTP ${response.status}`)
+  return (await response.json()) as DashboardPrincipal
+}
+
+export async function logoutDashboard(): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'include' })
+  if (!response.ok && response.status !== 204) throw new Error(`Dashboard logout failed: HTTP ${response.status}`)
+}
+
+export async function fetchApplications(apiKey: string): Promise<ApplicationRecord[]> {
+  const data = await managementRequest<{ applications?: ApplicationRecord[] }>(apiKey, '/api/applications')
+  return data.applications || []
+}
+
+export async function createApplication(
+  apiKey: string,
+  input: Pick<ApplicationRecord, 'name' | 'description'>
+): Promise<ApplicationRecord> {
+  return managementRequest<ApplicationRecord>(apiKey, '/api/applications', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function fetchAPIKeys(apiKey: string): Promise<APIKeyRecord[]> {
+  const data = await managementRequest<{ keys?: APIKeyRecord[] }>(apiKey, '/api/keys')
+  return data.keys || []
+}
+
+export async function createAPIKey(
+  apiKey: string,
+  input: {
+    applicationId: string
+    name: string
+    permissions: string[]
+    requestsPerWindow: number
+    windowSeconds: number
+    expiresAt?: string
+  }
+): Promise<APIKeyRecord> {
+  return managementRequest<APIKeyRecord>(apiKey, '/api/keys', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function revokeAPIKey(apiKey: string, id: string): Promise<void> {
+  await managementRequest<void>(apiKey, `/api/keys/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function updateAPIKeyPolicy(
+  apiKey: string,
+  id: string,
+  input: {
+    permissions: string[]
+    requestsPerWindow: number
+    windowSeconds: number
+    expiresAt?: string
+  }
+): Promise<void> {
+  await managementRequest<void>(apiKey, `/api/keys/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+}
+
+export async function fetchLoadBalancingSettings(apiKey: string): Promise<LoadBalancingSettings> {
+  return managementRequest<LoadBalancingSettings>(apiKey, '/api/settings/load-balancing')
+}
+
+export async function updateLoadBalancingSettings(apiKey: string, settings: LoadBalancingSettings): Promise<LoadBalancingSettings> {
+  return managementRequest<LoadBalancingSettings>(apiKey, '/api/settings/load-balancing', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+}
+
+export async function fetchAuditLogs(apiKey: string, limit = 100): Promise<AuditLogRecord[]> {
+  const data = await managementRequest<{ events?: AuditLogRecord[] }>(apiKey, `/api/audit-logs?limit=${limit}`)
+  return data.events || []
+}
+
+export async function fetchManagedBackends(apiKey: string): Promise<ManagedBackend[]> {
+  const data = await managementRequest<{ backends?: ManagedBackend[] }>(apiKey, '/api/backends')
+  return data.backends || []
+}
+
+export async function createManagedBackend(apiKey: string, backend: Omit<ManagedBackend, 'configId' | 'id' | 'healthStatus'>): Promise<ManagedBackend> {
+  return managementRequest<ManagedBackend>(apiKey, '/api/backends', { method: 'POST', body: JSON.stringify(backend) })
+}
+
+export async function updateManagedBackend(apiKey: string, backend: ManagedBackend): Promise<ManagedBackend> {
+  return managementRequest<ManagedBackend>(apiKey, `/api/backends/${encodeURIComponent(backend.configId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      name: backend.name,
+      url: backend.url,
+      weight: backend.weight,
+      enabled: backend.enabled,
+      maintenance: backend.maintenance,
+      healthPath: backend.healthPath,
+    }),
+  })
+}
+
+export async function deleteManagedBackend(apiKey: string, id: string): Promise<void> {
+  await managementRequest<void>(apiKey, `/api/backends/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function fetchManagedRoutes(apiKey: string): Promise<ManagedRoute[]> {
+  const data = await managementRequest<{ routes?: ManagedRoute[] }>(apiKey, '/api/routes')
+  return data.routes || []
+}
+
+export async function createManagedRoute(apiKey: string, route: Pick<ManagedRoute, 'name' | 'pathPrefix' | 'methods' | 'backendId' | 'authRequired' | 'enabled' | 'requestsPerWindow' | 'windowSeconds'>): Promise<ManagedRoute> {
+  return managementRequest<ManagedRoute>(apiKey, '/api/routes', { method: 'POST', body: JSON.stringify(route) })
+}
+
+export async function updateManagedRoute(apiKey: string, route: ManagedRoute): Promise<ManagedRoute> {
+  return managementRequest<ManagedRoute>(apiKey, `/api/routes/${encodeURIComponent(route.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      name: route.name,
+      pathPrefix: route.pathPrefix,
+      methods: route.methods,
+      backendId: route.backendId,
+      authRequired: route.authRequired,
+      enabled: route.enabled,
+      requestsPerWindow: route.requestsPerWindow ?? 0,
+      windowSeconds: route.windowSeconds ?? 0,
+    }),
+  })
+}
+
+export async function deleteManagedRoute(apiKey: string, id: string): Promise<void> {
+  await managementRequest<void>(apiKey, `/api/routes/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}

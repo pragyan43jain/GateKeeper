@@ -31,9 +31,9 @@
 		reverse_proxy gateway:8080
 	}
 
-	# 3. Gateway Metrics Exposition Endpoint
+	# Keep the metrics exposition endpoint private to the Compose network.
 	handle /metrics {
-		reverse_proxy gateway:8080
+		respond "Access Denied" 403
 	}
 
 	# 4. Scoped Prometheus Query Endpoints for Frontend Dashboard
