@@ -64,6 +64,16 @@ export interface ManagedBackend {
   healthStatus?: string
 }
 
+export interface BackendHealthEvent {
+  id: number
+  backendId: string
+  backendName: string
+  previousState: BackendHealthState
+  state: BackendHealthState
+  reason?: string
+  checkedAt: string
+}
+
 export interface ManagedRoute {
   id: string
   name: string

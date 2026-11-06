@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -263,7 +264,12 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("load balancing settings GET status=%d: %s", settingsResponse.Code, settingsResponse.Body.String())
 	}
 	managedBackendCalls := 0
+	healthFailing := atomic.Bool{}
 	managedBackendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if healthFailing.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		managedBackendCalls++
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -398,12 +404,42 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if deleteRouteResponse.Code != http.StatusNoContent {
 		t.Fatalf("route delete status=%d: %s", deleteRouteResponse.Code, deleteRouteResponse.Body.String())
 	}
+	checker := NewHealthChecker(pool, time.Hour, "/health", time.Second, 1, 2)
+	checker.SetManagementStore(store)
+	healthFailing.Store(true)
+	checker.probeNode(pool.NodeByConfigID(managedBackend.ID))
+	healthFailing.Store(false)
+	checker.probeNode(pool.NodeByConfigID(managedBackend.ID))
+	checker.probeNode(pool.NodeByConfigID(managedBackend.ID))
+	historyRequest := httptest.NewRequest(http.MethodGet, "/api/backend-health-history?backendId="+managedBackend.ID+"&limit=10", nil)
+	withAdminSession(historyRequest)
+	historyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(historyResponse, historyRequest)
+	if historyResponse.Code != http.StatusOK || !strings.Contains(historyResponse.Body.String(), `"previousState":"unhealthy","state":"recovering"`) || !strings.Contains(historyResponse.Body.String(), `"previousState":"recovering","state":"healthy"`) {
+		t.Fatalf("backend health history status=%d: %s", historyResponse.Code, historyResponse.Body.String())
+	}
+	for index := 0; index < 105; index++ {
+		if err := store.RecordBackendHealthEvent(ctx, BackendHealthEvent{
+			BackendID: managedBackend.ID, BackendName: managedBackend.Name, PreviousState: BackendHealthHealthy,
+			State: BackendHealthUnhealthy, CheckedAt: time.Now().Add(time.Duration(index) * time.Millisecond),
+		}); err != nil {
+			t.Fatalf("record bounded backend health history event: %v", err)
+		}
+	}
+	boundedHistory, err := store.ListBackendHealthHistory(ctx, managedBackend.ID, 100)
+	if err != nil || len(boundedHistory) != 100 {
+		t.Fatalf("backend health history retention count=%d err=%v", len(boundedHistory), err)
+	}
 	deleteBackendRequest := httptest.NewRequest(http.MethodDelete, "/api/backends/"+managedBackend.ID, nil)
 	withAdminSession(deleteBackendRequest)
 	deleteBackendResponse := httptest.NewRecorder()
 	handler.ServeHTTP(deleteBackendResponse, deleteBackendRequest)
 	if deleteBackendResponse.Code != http.StatusNoContent || len(pool.Nodes()) != initialBackendCount {
 		t.Fatalf("backend delete status=%d active nodes=%d: %s", deleteBackendResponse.Code, len(pool.Nodes()), deleteBackendResponse.Body.String())
+	}
+	deletedBackendHistory, err := store.ListBackendHealthHistory(ctx, managedBackend.ID, 100)
+	if err != nil || len(deletedBackendHistory) != 0 {
+		t.Fatalf("backend health history was not removed with its backend: events=%d err=%v", len(deletedBackendHistory), err)
 	}
 	settingsBody := fmt.Sprintf(`{"strategy":"weighted_round_robin","weights":{%q:3}}`, node.Name())
 	updateSettingsRequest := httptest.NewRequest(http.MethodPut, "/api/settings/load-balancing", strings.NewReader(settingsBody))

@@ -462,6 +462,33 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	}))
+	mux.HandleFunc("/api/backend-health-history", protect(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		backendID := r.URL.Query().Get("backendId")
+		if !uuidPattern.MatchString(backendID) {
+			http.Error(w, "A valid backendId is required", http.StatusBadRequest)
+			return
+		}
+		limit := 50
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 || parsed > 100 {
+				http.Error(w, "limit must be between 1 and 100", http.StatusBadRequest)
+				return
+			}
+			limit = parsed
+		}
+		events, err := store.ListBackendHealthHistory(r.Context(), backendID, limit)
+		if err != nil {
+			http.Error(w, "Failed to load backend health history", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": events, "count": len(events)})
+	}))
 	mux.HandleFunc("/api/audit-logs", protect(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")

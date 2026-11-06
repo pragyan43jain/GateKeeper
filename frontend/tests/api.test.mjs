@@ -17,6 +17,7 @@ import {
   updateLoadBalancingSettings,
   fetchAuditLogs,
   fetchManagedBackends,
+  fetchBackendHealthHistory,
   createManagedBackend,
   updateManagedBackend,
   deleteManagedBackend,
@@ -251,6 +252,23 @@ test('backend management service lists, registers, updates, and removes nodes', 
     assert.deepEqual(calls.map(call => call.init?.method || 'GET'), ['GET', 'POST', 'PUT', 'DELETE'])
     assert.ok(calls.every(call => call.init?.headers?.['X-API-Key'] === 'admin-key'))
     assert.equal(JSON.parse(calls[2].init.body).maintenance, true)
+  } finally { globalThis.fetch = original }
+})
+
+test('backend health history service requests the selected backend with a bounded limit', async () => {
+  const original = globalThis.fetch
+  let captured
+  globalThis.fetch = async (url, init) => {
+    captured = { url: String(url), init }
+    return Response.json({ events: [{ id: 1, backendId: 'backend-1', state: 'unhealthy' }] })
+  }
+  try {
+    const events = await fetchBackendHealthHistory('admin-key', 'backend/1', 20)
+    assert.equal(events.length, 1)
+    assert.match(captured.url, /backendId=backend%2F1/)
+    assert.match(captured.url, /limit=20/)
+    assert.equal(captured.init.credentials, 'include')
+    assert.equal(captured.init.headers['X-API-Key'], 'admin-key')
   } finally { globalThis.fetch = original }
 })
 

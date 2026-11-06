@@ -105,6 +105,16 @@ type AuditLogRecord struct {
 	CreatedAt    time.Time      `json:"createdAt"`
 }
 
+type BackendHealthEvent struct {
+	ID            int64              `json:"id"`
+	BackendID     string             `json:"backendId"`
+	BackendName   string             `json:"backendName"`
+	PreviousState BackendHealthState `json:"previousState"`
+	State         BackendHealthState `json:"state"`
+	Reason        string             `json:"reason,omitempty"`
+	CheckedAt     time.Time          `json:"checkedAt"`
+}
+
 type DashboardUser struct {
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
@@ -652,6 +662,46 @@ func (s *ManagementStore) ListAuditEvents(ctx context.Context, limit int) ([]Aud
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func (s *ManagementStore) RecordBackendHealthEvent(ctx context.Context, event BackendHealthEvent) error {
+	if event.BackendID == "" || len(event.BackendName) > 200 || len(event.Reason) > 500 {
+		return errors.New("invalid backend health event")
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO backend_health_history(
+		backend_id, backend_name, previous_state, state, reason, checked_at
+	) VALUES ($1, $2, $3, $4, $5, $6)`, event.BackendID, event.BackendName, event.PreviousState,
+		event.State, event.Reason, event.CheckedAt); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM backend_health_history
+		WHERE backend_id = $1 AND id IN (
+			SELECT id FROM backend_health_history WHERE backend_id = $1
+			ORDER BY checked_at DESC, id DESC OFFSET 100
+		)`, event.BackendID)
+	return err
+}
+
+func (s *ManagementStore) ListBackendHealthHistory(ctx context.Context, backendID string, limit int) ([]BackendHealthEvent, error) {
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, backend_id::text, backend_name, previous_state, state, reason, checked_at
+		FROM backend_health_history WHERE backend_id = $1 ORDER BY checked_at DESC, id DESC LIMIT $2`, backendID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]BackendHealthEvent, 0)
+	for rows.Next() {
+		var event BackendHealthEvent
+		if err := rows.Scan(&event.ID, &event.BackendID, &event.BackendName, &event.PreviousState,
+			&event.State, &event.Reason, &event.CheckedAt); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func (s *ManagementStore) ValidateAPIKey(ctx context.Context, raw string) (APIKeyPrincipal, error) {

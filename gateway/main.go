@@ -1183,6 +1183,7 @@ func (p *BackendPool) UpdateMetrics() {
 // HealthChecker periodically probes backend nodes to detect health and accelerate recovery.
 type HealthChecker struct {
 	pool               *BackendPool
+	store              *ManagementStore
 	interval           time.Duration
 	path               string
 	timeout            time.Duration
@@ -1240,6 +1241,12 @@ func (hc *HealthChecker) SetMetrics(m *GatewayMetrics) {
 	hc.metrics = m
 }
 
+func (hc *HealthChecker) SetManagementStore(store *ManagementStore) {
+	if hc != nil {
+		hc.store = store
+	}
+}
+
 // Start launches the background health check loop in a separate goroutine.
 func (hc *HealthChecker) Start() {
 	if hc == nil {
@@ -1285,14 +1292,18 @@ func (hc *HealthChecker) probeNode(node *BackendNode) {
 	probeURL := strings.TrimRight(node.url.String(), "/") + healthPath
 	req, err := http.NewRequest(http.MethodGet, probeURL, nil)
 	if err != nil {
+		previous := node.HealthState()
 		node.RecordHealthFailure(err, hc.unhealthyThreshold)
+		hc.recordHealthTransition(node, previous)
 		hc.updateNodeMetrics(node, false)
 		return
 	}
 
 	resp, err := hc.client.Do(req)
 	if err != nil {
+		previous := node.HealthState()
 		node.RecordHealthFailure(err, hc.unhealthyThreshold)
+		hc.recordHealthTransition(node, previous)
 		hc.updateNodeMetrics(node, false)
 		return
 	}
@@ -1300,11 +1311,36 @@ func (hc *HealthChecker) probeNode(node *BackendNode) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode < 400 {
+		previous := node.HealthState()
 		node.RecordHealthSuccess(hc.unhealthyThreshold, hc.recoveryThreshold)
+		hc.recordHealthTransition(node, previous)
 		hc.updateNodeMetrics(node, true)
 	} else {
+		previous := node.HealthState()
 		node.RecordHealthFailure(fmt.Errorf("HTTP %d", resp.StatusCode), hc.unhealthyThreshold)
+		hc.recordHealthTransition(node, previous)
 		hc.updateNodeMetrics(node, false)
+	}
+}
+
+func (hc *HealthChecker) recordHealthTransition(node *BackendNode, previous BackendHealthState) {
+	if hc.store == nil || node == nil || node.configID == "" {
+		return
+	}
+	state, _, _, checkedAt, reason := node.HealthInfo()
+	if state == previous {
+		return
+	}
+	if len(reason) > 500 {
+		reason = reason[:500]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := hc.store.RecordBackendHealthEvent(ctx, BackendHealthEvent{
+		BackendID: node.configID, BackendName: node.Name(), PreviousState: previous,
+		State: state, Reason: reason, CheckedAt: checkedAt,
+	}); err != nil {
+		log.Printf("backend_health_history_write_failed backend_id=%s", node.configID)
 	}
 }
 
@@ -2649,6 +2685,7 @@ func main() {
 	healthChecker := NewHealthChecker(pool, healthCheckInterval, healthCheckPath, healthCheckTimeout, unhealthyThreshold, recoveryThreshold)
 	if healthChecker != nil {
 		healthChecker.SetMetrics(metrics)
+		healthChecker.SetManagementStore(NewManagementStore(managementDB))
 		healthChecker.Start()
 		defer healthChecker.Stop()
 		log.Printf("Active health checker started (interval: %s, path: %s, unhealthy: %d, recovery: %d)",

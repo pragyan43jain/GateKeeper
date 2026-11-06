@@ -3,6 +3,7 @@ import type {
   GatewayMetricsSummary,
   BackendNodeStatus,
   BackendDiagnostic,
+  BackendHealthEvent,
   BackendHealthState,
   RequestLogEntry,
   MetricSample,
@@ -703,6 +704,14 @@ export async function fetchAuditLogs(apiKey: string, limit = 100): Promise<Audit
 export async function fetchManagedBackends(apiKey: string): Promise<ManagedBackend[]> {
   const data = await managementRequest<{ backends?: ManagedBackend[] }>(apiKey, '/api/backends')
   return data.backends || []
+}
+
+export async function fetchBackendHealthHistory(apiKey: string, backendId: string, limit = 50): Promise<BackendHealthEvent[]> {
+  const data = await managementRequest<{ events?: BackendHealthEvent[] }>(
+    apiKey,
+    `/api/backend-health-history?backendId=${encodeURIComponent(backendId)}&limit=${limit}`
+  )
+  return data.events || []
 }
 
 export async function createManagedBackend(apiKey: string, backend: Omit<ManagedBackend, 'configId' | 'id' | 'healthStatus'>): Promise<ManagedBackend> {
