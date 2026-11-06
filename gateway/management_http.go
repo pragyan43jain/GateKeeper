@@ -573,6 +573,7 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 				Permissions       []string `json:"permissions"`
 				RequestsPerWindow int      `json:"requestsPerWindow"`
 				WindowSeconds     int      `json:"windowSeconds"`
+				Burst             int      `json:"burst"`
 				ExpiresAt         string   `json:"expiresAt"`
 			}
 			if err := decodeManagementJSON(w, r, &input); err != nil {
@@ -584,8 +585,8 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 				http.Error(w, "A valid applicationId and key name (max 100 characters) are required", http.StatusBadRequest)
 				return
 			}
-			if input.RequestsPerWindow < 1 || input.RequestsPerWindow > 1_000_000 || input.WindowSeconds < 1 || input.WindowSeconds > 86_400 {
-				http.Error(w, "Rate limit must be 1..1000000 requests per 1..86400 seconds", http.StatusBadRequest)
+			if input.RequestsPerWindow < 1 || input.RequestsPerWindow > 1_000_000 || input.WindowSeconds < 1 || input.WindowSeconds > 86_400 || input.Burst < 0 || input.Burst > 1_000_000 {
+				http.Error(w, "Rate limit must be 1..1000000 requests per 1..86400 seconds and burst 0..1000000", http.StatusBadRequest)
 				return
 			}
 			permissions, err := normalizePermissions(input.Permissions)
@@ -602,7 +603,7 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 				}
 				expiresAt = &parsed
 			}
-			key, err := store.CreateAPIKey(r.Context(), input.ApplicationID, input.Name, permissions, input.RequestsPerWindow, input.WindowSeconds, expiresAt)
+			key, err := store.CreateAPIKey(r.Context(), input.ApplicationID, input.Name, permissions, input.RequestsPerWindow, input.WindowSeconds, input.Burst, expiresAt)
 			if err != nil {
 				http.Error(w, "Failed to create API key; verify the application exists", http.StatusBadRequest)
 				return
@@ -620,14 +621,15 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 				Permissions       []string `json:"permissions"`
 				RequestsPerWindow int      `json:"requestsPerWindow"`
 				WindowSeconds     int      `json:"windowSeconds"`
+				Burst             int      `json:"burst"`
 				ExpiresAt         *string  `json:"expiresAt"`
 			}
 			if err := decodeManagementJSON(w, r, &input); err != nil {
 				http.Error(w, "Invalid JSON request", http.StatusBadRequest)
 				return
 			}
-			if input.RequestsPerWindow < 1 || input.RequestsPerWindow > 1_000_000 || input.WindowSeconds < 1 || input.WindowSeconds > 86_400 {
-				http.Error(w, "Rate limit must be 1..1000000 requests per 1..86400 seconds", http.StatusBadRequest)
+			if input.RequestsPerWindow < 1 || input.RequestsPerWindow > 1_000_000 || input.WindowSeconds < 1 || input.WindowSeconds > 86_400 || input.Burst < 0 || input.Burst > 1_000_000 {
+				http.Error(w, "Rate limit must be 1..1000000 requests per 1..86400 seconds and burst 0..1000000", http.StatusBadRequest)
 				return
 			}
 			permissions, err := normalizePermissions(input.Permissions)
@@ -644,7 +646,7 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 				}
 				expiresAt = &parsed
 			}
-			if err := store.UpdateAPIKeyPolicy(r.Context(), id, permissions, input.RequestsPerWindow, input.WindowSeconds, expiresAt, input.ExpiresAt != nil); err != nil {
+			if err := store.UpdateAPIKeyPolicy(r.Context(), id, permissions, input.RequestsPerWindow, input.WindowSeconds, input.Burst, expiresAt, input.ExpiresAt != nil); err != nil {
 				if errors.Is(err, ErrAPIKeyNotFound) {
 					http.Error(w, "API key not found or inactive", http.StatusNotFound)
 					return
@@ -795,6 +797,7 @@ func decodeRouteInput(w http.ResponseWriter, r *http.Request, creating bool, cur
 		Enabled           *bool    `json:"enabled"`
 		RequestsPerWindow *int     `json:"requestsPerWindow"`
 		WindowSeconds     *int     `json:"windowSeconds"`
+		Burst             *int     `json:"burst"`
 	}
 	if err := decodeManagementJSON(w, r, &input); err != nil {
 		return ManagedRoute{}, http.StatusBadRequest, errors.New("invalid JSON request")
@@ -832,6 +835,11 @@ func decodeRouteInput(w http.ResponseWriter, r *http.Request, creating bool, cur
 	} else if creating {
 		route.WindowSeconds = 0
 	}
+	if input.Burst != nil {
+		route.Burst = *input.Burst
+	} else if creating {
+		route.Burst = 0
+	}
 	if route.Name == "" || len(route.Name) > 100 {
 		return ManagedRoute{}, http.StatusBadRequest, errors.New("route name is required and limited to 100 characters")
 	}
@@ -861,8 +869,8 @@ func decodeRouteInput(w http.ResponseWriter, r *http.Request, creating bool, cur
 		return ManagedRoute{}, http.StatusBadRequest, errors.New("wildcard method cannot be combined with specific methods")
 	}
 	route.Methods = methods
-	if (route.RequestsPerWindow == 0) != (route.WindowSeconds == 0) || route.RequestsPerWindow < 0 || route.RequestsPerWindow > 1_000_000 || route.WindowSeconds < 0 || route.WindowSeconds > 86_400 {
-		return ManagedRoute{}, http.StatusBadRequest, errors.New("route rate limit must be disabled with both fields zero or set to 1..1000000 requests per 1..86400 seconds")
+	if (route.RequestsPerWindow == 0) != (route.WindowSeconds == 0) || route.RequestsPerWindow < 0 || route.RequestsPerWindow > 1_000_000 || route.WindowSeconds < 0 || route.WindowSeconds > 86_400 || route.Burst < 0 || route.Burst > 1_000_000 || (route.RequestsPerWindow == 0 && route.Burst > 0) {
+		return ManagedRoute{}, http.StatusBadRequest, errors.New("route rate limit must be disabled with all fields zero or set to 1..1000000 requests per 1..86400 seconds and burst 0..1000000")
 	}
 	return route, 0, nil
 }

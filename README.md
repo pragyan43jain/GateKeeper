@@ -61,6 +61,7 @@ flowchart TD
 - **API-Key Authentication**: Constant-time verification of consumer `X-API-Key` credentials on routed API traffic. Dashboard management endpoints require a named dashboard session.
 - **API Key Management**: PostgreSQL-backed consumer applications and API keys, hashed secret storage, expiry, read/write permissions, dynamically editable per-key quotas, usage counts, and revocation through protected management endpoints.
 - **Atomic Redis Rate Limiting**: Sliding-window rate limiting powered by a Redis Lua script and sorted sets. Redis server time coordinates gateway instances; rejected requests do not extend a consumer's active window.
+- **Per-Key and Per-Route Burst Allowance**: Administrators can configure a bounded number of additional requests within each policy's sliding window. Rate-limit headers report the combined quota, while Redis remains the shared atomic enforcement point.
 - **Health-Aware Load Balancing**: Select round robin (default), weighted round robin, least in-flight requests, or random distribution. Unhealthy and circuit-open backends are excluded when healthy alternatives exist. `BACKEND_WEIGHTS` configures initial weights in the same order as `BACKEND_URLS`; authorized administrators can persist and change strategy and weights from the dashboard.
 - **Persistent Upstream and Route Management**: Bootstrap upstreams from `BACKEND_URLS`, then manage backend membership, weights, maintenance mode, health paths, route prefixes, methods, and authentication policy through protected APIs and dashboard pages. Route changes publish atomically and take effect without restarting the gateway.
 - **Independent Circuit Breakers**: Dedicated per-backend circuit breakers with isolated failure thresholds, cooldown intervals, and half-open trial probes. Automatically skips failing backends and fast-fails with `503 Service Unavailable` and `Retry-After` if all backends are down.
@@ -204,12 +205,12 @@ docker compose up -d --build
    ```
 
 5. **Verify Rate Limiting**:
-   Send 11 rapid requests with your API key to observe the sliding-window limit:
+   Send rapid requests with your API key to observe the sliding-window limit. A policy with a burst of zero rejects after its configured request count; configured burst requests extend that count for the same window:
    ```bash
    for i in {1..11}; do
      curl -s -o /dev/null -w "%{http_code}\n" -H "X-API-Key: $KEY" https://gatekeeper.yourdomain.com/api/students
    done
-   # Expected: First 10 return 200, 11th returns 429 Too Many Requests with Retry-After header
+   # Expected with the default zero burst: first 10 return 200, 11th returns 429 with Retry-After
    ```
 
 6. **Verify Scoped Prometheus Protection & Method Restrictions**:

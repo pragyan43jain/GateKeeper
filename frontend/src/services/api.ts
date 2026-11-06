@@ -653,6 +653,7 @@ export async function createAPIKey(
     permissions: string[]
     requestsPerWindow: number
     windowSeconds: number
+    burst: number
     expiresAt?: string
   }
 ): Promise<APIKeyRecord> {
@@ -673,6 +674,7 @@ export async function updateAPIKeyPolicy(
     permissions: string[]
     requestsPerWindow: number
     windowSeconds: number
+    burst: number
     expiresAt?: string
   }
 ): Promise<void> {
@@ -730,7 +732,7 @@ export async function fetchManagedRoutes(apiKey: string): Promise<ManagedRoute[]
   return data.routes || []
 }
 
-export async function createManagedRoute(apiKey: string, route: Pick<ManagedRoute, 'name' | 'pathPrefix' | 'methods' | 'backendId' | 'authRequired' | 'enabled' | 'requestsPerWindow' | 'windowSeconds'>): Promise<ManagedRoute> {
+export async function createManagedRoute(apiKey: string, route: Pick<ManagedRoute, 'name' | 'pathPrefix' | 'methods' | 'backendId' | 'authRequired' | 'enabled' | 'requestsPerWindow' | 'windowSeconds' | 'burst'>): Promise<ManagedRoute> {
   return managementRequest<ManagedRoute>(apiKey, '/api/routes', { method: 'POST', body: JSON.stringify(route) })
 }
 
@@ -746,6 +748,7 @@ export async function updateManagedRoute(apiKey: string, route: ManagedRoute): P
       enabled: route.enabled,
       requestsPerWindow: route.requestsPerWindow ?? 0,
       windowSeconds: route.windowSeconds ?? 0,
+      burst: route.burst ?? 0,
     }),
   })
 }

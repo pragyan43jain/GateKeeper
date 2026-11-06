@@ -94,7 +94,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create application: %v", err)
 	}
-	key, err := store.CreateAPIKey(ctx, app.ID, "read-only integration key", []string{"read"}, 5, 30, nil)
+	key, err := store.CreateAPIKey(ctx, app.ID, "read-only integration key", []string{"read"}, 5, 30, 3, nil)
 	if err != nil {
 		t.Fatalf("create API key: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate generated API key: %v", err)
 	}
-	if principal.ID != key.ID || principal.RequestsPerWindow != 5 || principal.WindowSeconds != 30 || len(principal.Permissions) != 1 || principal.Permissions[0] != "read" {
+	if principal.ID != key.ID || principal.RequestsPerWindow != 5 || principal.WindowSeconds != 30 || principal.Burst != 3 || len(principal.Permissions) != 1 || principal.Permissions[0] != "read" {
 		t.Fatalf("unexpected validated key principal: %+v", principal)
 	}
 	listed, err := store.ListAPIKeys(ctx)
@@ -238,7 +238,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if writeResponse.Code != http.StatusForbidden || backendCalls != 1 {
 		t.Fatalf("read-only key write status=%d backend calls=%d", writeResponse.Code, backendCalls)
 	}
-	policyBody := `{"permissions":["write"],"requestsPerWindow":8,"windowSeconds":45}`
+	policyBody := `{"permissions":["write"],"requestsPerWindow":8,"windowSeconds":45,"burst":4}`
 	policyRequest := httptest.NewRequest(http.MethodPatch, "/api/keys/"+key.ID, strings.NewReader(policyBody))
 	withAdminSession(policyRequest)
 	policyResponse := httptest.NewRecorder()
@@ -247,7 +247,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 		t.Fatalf("update policy status = %d: %s", policyResponse.Code, policyResponse.Body.String())
 	}
 	updatedPrincipal, err := store.ValidateAPIKey(ctx, key.Secret)
-	if err != nil || updatedPrincipal.RequestsPerWindow != 8 || updatedPrincipal.WindowSeconds != 45 || len(updatedPrincipal.Permissions) != 2 {
+	if err != nil || updatedPrincipal.RequestsPerWindow != 8 || updatedPrincipal.WindowSeconds != 45 || updatedPrincipal.Burst != 4 || len(updatedPrincipal.Permissions) != 2 {
 		t.Fatalf("updated policy did not take effect immediately: principal=%+v err=%v", updatedPrincipal, err)
 	}
 	writeAfterPolicy := httptest.NewRecorder()
@@ -326,7 +326,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if resumeResponse.Code != http.StatusOK {
 		t.Fatalf("backend resume status=%d: %s", resumeResponse.Code, resumeResponse.Body.String())
 	}
-	routeBody := fmt.Sprintf(`{"name":"integration route","pathPrefix":"/api/integration","methods":["GET"],"backendId":%q,"authRequired":false,"enabled":true,"requestsPerWindow":2,"windowSeconds":30}`, managedBackend.ID)
+	routeBody := fmt.Sprintf(`{"name":"integration route","pathPrefix":"/api/integration","methods":["GET"],"backendId":%q,"authRequired":false,"enabled":true,"requestsPerWindow":2,"windowSeconds":30,"burst":1}`, managedBackend.ID)
 	createRouteRequest := httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(routeBody))
 	withAdminSession(createRouteRequest)
 	createRouteResponse := httptest.NewRecorder()
@@ -340,7 +340,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	}
 	waitFor(t, 6*time.Second, func() bool {
 		route, matched, allowed := peerRoutes.Match("/api/integration/items", http.MethodGet)
-		return matched && allowed && route.ID == managedRoute.ID && route.BackendID == managedBackend.ID
+		return matched && allowed && route.ID == managedRoute.ID && route.BackendID == managedBackend.ID && route.Burst == 1
 	}, "peer gateway to install the managed route")
 	publicRouteRequest := httptest.NewRequest(http.MethodGet, "/api/integration/items", nil)
 	publicRouteResponse := httptest.NewRecorder()
@@ -348,10 +348,10 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if publicRouteResponse.Code != http.StatusOK || managedBackendCalls != 1 {
 		t.Fatalf("public route dispatch status=%d backend calls=%d: %s", publicRouteResponse.Code, managedBackendCalls, publicRouteResponse.Body.String())
 	}
-	if policyLimiter.limit != 2 || policyLimiter.window != 30*time.Second || !strings.HasPrefix(policyLimiter.identity, "route:"+managedRoute.ID+":") {
+	if policyLimiter.limit != 2 || policyLimiter.window != 30*time.Second || policyLimiter.burst != 1 || !strings.HasPrefix(policyLimiter.identity, "route:"+managedRoute.ID+":") {
 		t.Fatalf("route traffic policy not enforced: %+v", policyLimiter)
 	}
-	updateRoutePolicyRequest := httptest.NewRequest(http.MethodPut, "/api/routes/"+managedRoute.ID, strings.NewReader(`{"requestsPerWindow":6,"windowSeconds":45}`))
+	updateRoutePolicyRequest := httptest.NewRequest(http.MethodPut, "/api/routes/"+managedRoute.ID, strings.NewReader(`{"requestsPerWindow":6,"windowSeconds":45,"burst":2}`))
 	withAdminSession(updateRoutePolicyRequest)
 	updateRoutePolicyResponse := httptest.NewRecorder()
 	handler.ServeHTTP(updateRoutePolicyResponse, updateRoutePolicyRequest)
@@ -360,7 +360,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	}
 	waitFor(t, 6*time.Second, func() bool {
 		route, matched, _ := peerRoutes.Match("/api/integration/items", http.MethodGet)
-		return matched && route.ID == managedRoute.ID && route.RequestsPerWindow == 6 && route.WindowSeconds == 45
+		return matched && route.ID == managedRoute.ID && route.RequestsPerWindow == 6 && route.WindowSeconds == 45 && route.Burst == 2
 	}, "peer gateway to apply the updated route policy")
 	publicRouteAfterPolicyUpdate := httptest.NewRecorder()
 	handler.ServeHTTP(publicRouteAfterPolicyUpdate, httptest.NewRequest(http.MethodGet, "/api/integration/items", nil))
@@ -547,6 +547,7 @@ type capturingPolicyLimiter struct {
 	limit    int64
 	window   time.Duration
 	identity string
+	burst    int64
 }
 
 func (l *capturingPolicyLimiter) Allow(context.Context, string) (RateLimitResult, error) {
@@ -558,4 +559,9 @@ func (l *capturingPolicyLimiter) AllowWithPolicy(_ context.Context, identity str
 	l.limit = limit
 	l.window = window
 	return RateLimitResult{Allowed: true, Limit: limit, Remaining: limit - 1, RetryAfter: int64(window.Seconds())}, nil
+}
+
+func (l *capturingPolicyLimiter) AllowWithPolicyAndBurst(ctx context.Context, identity string, limit int64, window time.Duration, burst int64) (RateLimitResult, error) {
+	l.burst = burst
+	return l.AllowWithPolicy(ctx, identity, limit, window)
 }

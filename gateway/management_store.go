@@ -45,6 +45,7 @@ type APIKeyRecord struct {
 	Permissions       []string   `json:"permissions"`
 	RequestsPerWindow int        `json:"requestsPerWindow"`
 	WindowSeconds     int        `json:"windowSeconds"`
+	Burst             int        `json:"burst"`
 	ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
 	RevokedAt         *time.Time `json:"revokedAt,omitempty"`
 	CreatedAt         time.Time  `json:"createdAt"`
@@ -57,6 +58,7 @@ type APIKeyPrincipal struct {
 	ID                string
 	RequestsPerWindow int
 	WindowSeconds     int
+	Burst             int
 	Permissions       []string
 }
 
@@ -88,6 +90,7 @@ type ManagedRoute struct {
 	Enabled           bool      `json:"enabled"`
 	RequestsPerWindow int       `json:"requestsPerWindow,omitempty"`
 	WindowSeconds     int       `json:"windowSeconds,omitempty"`
+	Burst             int       `json:"burst,omitempty"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
 }
@@ -377,10 +380,10 @@ func (s *ManagementStore) RestoreBackend(ctx context.Context, backend ManagedBac
 func (s *ManagementStore) ListRoutes(ctx context.Context) ([]ManagedRoute, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id::text, r.name, r.path_prefix, to_json(r.methods),
 		r.backend_id::text, b.name, r.auth_required, r.enabled, r.created_at, r.updated_at,
-		COALESCE(policy.requests, 0), COALESCE(policy.window_seconds, 0)
+		COALESCE(policy.requests, 0), COALESCE(policy.window_seconds, 0), COALESCE(policy.burst, 0)
 		FROM routes r JOIN backends b ON b.id = r.backend_id
 		LEFT JOIN LATERAL (
-			SELECT requests, window_seconds FROM rate_limit_rules
+			SELECT requests, window_seconds, burst FROM rate_limit_rules
 			WHERE route_id = r.id AND api_key_id IS NULL AND enabled
 			ORDER BY id DESC LIMIT 1
 		) policy ON TRUE
@@ -394,7 +397,7 @@ func (s *ManagementStore) ListRoutes(ctx context.Context) ([]ManagedRoute, error
 		var route ManagedRoute
 		var methods []byte
 		if err := rows.Scan(&route.ID, &route.Name, &route.PathPrefix, &methods, &route.BackendID, &route.BackendName,
-			&route.AuthRequired, &route.Enabled, &route.CreatedAt, &route.UpdatedAt, &route.RequestsPerWindow, &route.WindowSeconds); err != nil {
+			&route.AuthRequired, &route.Enabled, &route.CreatedAt, &route.UpdatedAt, &route.RequestsPerWindow, &route.WindowSeconds, &route.Burst); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(methods, &route.Methods); err != nil {
@@ -458,14 +461,14 @@ func saveRouteRateLimit(ctx context.Context, tx *sql.Tx, route ManagedRoute) err
 	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limit_rules WHERE route_id = $1 AND api_key_id IS NULL`, route.ID); err != nil {
 		return err
 	}
-	if route.RequestsPerWindow == 0 && route.WindowSeconds == 0 {
+	if route.RequestsPerWindow == 0 && route.WindowSeconds == 0 && route.Burst == 0 {
 		return nil
 	}
-	if route.RequestsPerWindow < 1 || route.RequestsPerWindow > 1_000_000 || route.WindowSeconds < 1 || route.WindowSeconds > 86_400 {
-		return errors.New("route rate limit must be 1..1000000 requests per 1..86400 seconds")
+	if route.RequestsPerWindow < 1 || route.RequestsPerWindow > 1_000_000 || route.WindowSeconds < 1 || route.WindowSeconds > 86_400 || route.Burst < 0 || route.Burst > 1_000_000 {
+		return errors.New("route rate limit must be 1..1000000 requests per 1..86400 seconds with burst 0..1000000")
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO rate_limit_rules(name, route_id, requests, window_seconds, enabled)
-		VALUES ($1, $2, $3, $4, TRUE)`, "route:"+route.PathPrefix, route.ID, route.RequestsPerWindow, route.WindowSeconds)
+	_, err := tx.ExecContext(ctx, `INSERT INTO rate_limit_rules(name, route_id, requests, window_seconds, burst, enabled)
+		VALUES ($1, $2, $3, $4, $5, TRUE)`, "route:"+route.PathPrefix, route.ID, route.RequestsPerWindow, route.WindowSeconds, route.Burst)
 	return err
 }
 
@@ -484,7 +487,7 @@ func (s *ManagementStore) DeleteRoute(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *ManagementStore) CreateAPIKey(ctx context.Context, applicationID, name string, permissions []string, limit, windowSeconds int, expiresAt *time.Time) (APIKeyRecord, error) {
+func (s *ManagementStore) CreateAPIKey(ctx context.Context, applicationID, name string, permissions []string, limit, windowSeconds, burst int, expiresAt *time.Time) (APIKeyRecord, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return APIKeyRecord{}, fmt.Errorf("generate API key: %w", err)
@@ -499,6 +502,7 @@ func (s *ManagementStore) CreateAPIKey(ctx context.Context, applicationID, name 
 	key.Permissions = permissions
 	key.RequestsPerWindow = limit
 	key.WindowSeconds = windowSeconds
+	key.Burst = burst
 	key.ExpiresAt = expiresAt
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -506,10 +510,10 @@ func (s *ManagementStore) CreateAPIKey(ctx context.Context, applicationID, name 
 	}
 	defer tx.Rollback()
 	err = tx.QueryRowContext(ctx, `INSERT INTO api_keys(
-		application_id, name, key_prefix, key_hash, permissions, requests_per_window, window_seconds, expires_at
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		application_id, name, key_prefix, key_hash, permissions, requests_per_window, window_seconds, expires_at, burst
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	RETURNING id::text, application_id::text, key_prefix, created_at`,
-		applicationID, name, prefix, []byte(hashAPIKey(secret)), permissions, limit, windowSeconds, expiresAt,
+		applicationID, name, prefix, []byte(hashAPIKey(secret)), permissions, limit, windowSeconds, expiresAt, burst,
 	).Scan(&key.ID, &key.ApplicationID, &key.Prefix, &key.CreatedAt)
 	if err != nil {
 		return APIKeyRecord{}, err
@@ -526,7 +530,7 @@ func (s *ManagementStore) CreateAPIKey(ctx context.Context, applicationID, name 
 
 func (s *ManagementStore) ListAPIKeys(ctx context.Context) ([]APIKeyRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT k.id::text, k.application_id::text, a.name,
-		k.name, k.key_prefix, to_json(k.permissions), k.requests_per_window, k.window_seconds,
+		k.name, k.key_prefix, to_json(k.permissions), k.requests_per_window, k.window_seconds, k.burst,
 		k.expires_at, k.revoked_at, k.created_at, k.last_used_at, k.usage_count
 		FROM api_keys k JOIN applications a ON a.id = k.application_id
 		ORDER BY k.created_at DESC`)
@@ -539,7 +543,7 @@ func (s *ManagementStore) ListAPIKeys(ctx context.Context) ([]APIKeyRecord, erro
 		var key APIKeyRecord
 		var permissions []byte
 		if err := rows.Scan(&key.ID, &key.ApplicationID, &key.ApplicationName, &key.Name, &key.Prefix,
-			&permissions, &key.RequestsPerWindow, &key.WindowSeconds, &key.ExpiresAt,
+			&permissions, &key.RequestsPerWindow, &key.WindowSeconds, &key.Burst, &key.ExpiresAt,
 			&key.RevokedAt, &key.CreatedAt, &key.LastUsedAt, &key.UsageCount); err != nil {
 			return nil, err
 		}
@@ -567,11 +571,11 @@ func (s *ManagementStore) RevokeAPIKey(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *ManagementStore) UpdateAPIKeyPolicy(ctx context.Context, id string, permissions []string, limit, windowSeconds int, expiresAt *time.Time, updateExpiry bool) error {
+func (s *ManagementStore) UpdateAPIKeyPolicy(ctx context.Context, id string, permissions []string, limit, windowSeconds, burst int, expiresAt *time.Time, updateExpiry bool) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE api_keys
-		SET permissions = $2, requests_per_window = $3, window_seconds = $4,
-			expires_at = CASE WHEN $6 THEN $5 ELSE expires_at END
-		WHERE id = $1 AND revoked_at IS NULL`, id, permissions, limit, windowSeconds, expiresAt, updateExpiry)
+		SET permissions = $2, requests_per_window = $3, window_seconds = $4, burst = $5,
+			expires_at = CASE WHEN $7 THEN $6 ELSE expires_at END
+		WHERE id = $1 AND revoked_at IS NULL`, id, permissions, limit, windowSeconds, burst, expiresAt, updateExpiry)
 	if err != nil {
 		return err
 	}
@@ -655,8 +659,8 @@ func (s *ManagementStore) ValidateAPIKey(ctx context.Context, raw string) (APIKe
 	var permissions []byte
 	err := s.db.QueryRowContext(ctx, `UPDATE api_keys SET last_used_at = now(), usage_count = usage_count + 1
 		WHERE key_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
-		RETURNING id::text, requests_per_window, window_seconds, to_json(permissions)`, []byte(hashAPIKey(raw))).
-		Scan(&principal.ID, &principal.RequestsPerWindow, &principal.WindowSeconds, &permissions)
+		RETURNING id::text, requests_per_window, window_seconds, burst, to_json(permissions)`, []byte(hashAPIKey(raw))).
+		Scan(&principal.ID, &principal.RequestsPerWindow, &principal.WindowSeconds, &principal.Burst, &permissions)
 	if errors.Is(err, sql.ErrNoRows) {
 		return APIKeyPrincipal{}, ErrAPIKeyNotFound
 	}

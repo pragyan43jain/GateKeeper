@@ -21,6 +21,7 @@ export function APIKeysSection({ apiKey, onApiKeyChange }: APIKeysSectionProps) 
   const [permission, setPermission] = useState<'read' | 'write'>('read')
   const [requestsPerWindow, setRequestsPerWindow] = useState(100)
   const [windowSeconds, setWindowSeconds] = useState(60)
+  const [burst, setBurst] = useState(0)
   const [expiresAt, setExpiresAt] = useState('')
   const [oneTimeSecret, setOneTimeSecret] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -80,6 +81,7 @@ export function APIKeysSection({ apiKey, onApiKeyChange }: APIKeysSectionProps) 
         permissions: [permission],
         requestsPerWindow,
         windowSeconds,
+        burst,
         ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
       })
       setOneTimeSecret(created.secret || null)
@@ -187,6 +189,7 @@ export function APIKeysSection({ apiKey, onApiKeyChange }: APIKeysSectionProps) 
             <label className="space-y-1 text-xs text-zinc-400">Permission<select value={permission} onChange={(event) => setPermission(event.target.value as 'read' | 'write')} className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200"><option value="read">Read only</option><option value="write">Read and write</option></select></label>
             <label className="space-y-1 text-xs text-zinc-400">Requests per window<input required type="number" min={1} max={1000000} value={requestsPerWindow} onChange={(event) => setRequestsPerWindow(Number(event.target.value))} className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200" /></label>
             <label className="space-y-1 text-xs text-zinc-400">Window (seconds)<input required type="number" min={1} max={86400} value={windowSeconds} onChange={(event) => setWindowSeconds(Number(event.target.value))} className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200" /></label>
+            <label className="space-y-1 text-xs text-zinc-400">Burst allowance<input required type="number" min={0} max={1000000} value={burst} onChange={(event) => setBurst(Number(event.target.value))} className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200" /></label>
             <label className="space-y-1 text-xs text-zinc-400">Expires (optional)<input type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200" /></label>
           </div>
           <button disabled={loading || applications.length === 0} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"><Plus size={16} />Generate key</button>

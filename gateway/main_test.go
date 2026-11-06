@@ -317,6 +317,21 @@ func TestRateLimiterSlidingWindowRetainsRecentTrafficAcrossBoundary(t *testing.T
 	}
 }
 
+func TestRateLimiterBurstExtendsSlidingWindowAllowance(t *testing.T) {
+	rdb, prefix := setupTestRedis(t)
+	limiter := NewRedisRateLimiter(rdb, prefix, 2, time.Minute)
+	for request := 1; request <= 3; request++ {
+		result, err := limiter.AllowWithPolicyAndBurst(context.Background(), "burst", 2, time.Minute, 1)
+		if err != nil || !result.Allowed || result.Limit != 3 || result.Remaining != int64(3-request) {
+			t.Fatalf("burst request %d: result=%+v err=%v", request, result, err)
+		}
+	}
+	result, err := limiter.AllowWithPolicyAndBurst(context.Background(), "burst", 2, time.Minute, 1)
+	if err != nil || result.Allowed || result.Remaining != 0 {
+		t.Fatalf("request beyond burst allowance should be rejected: result=%+v err=%v", result, err)
+	}
+}
+
 // mockFailingLimiter simulates Redis outage.
 type mockFailingLimiter struct{}
 

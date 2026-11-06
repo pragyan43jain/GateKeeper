@@ -75,6 +75,7 @@ export interface ManagedRoute {
   enabled: boolean
   requestsPerWindow?: number
   windowSeconds?: number
+  burst?: number
   createdAt: string
   updatedAt: string
 }
@@ -106,6 +107,7 @@ export interface APIKeyRecord {
   permissions: string[]
   requestsPerWindow: number
   windowSeconds: number
+  burst: number
   expiresAt?: string
   revokedAt?: string
   createdAt: string

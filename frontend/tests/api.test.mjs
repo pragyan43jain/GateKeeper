@@ -180,6 +180,7 @@ test('API key management service authenticates requests and exposes lifecycle op
       permissions: ['read'],
       requestsPerWindow: 50,
       windowSeconds: 60,
+      burst: 5,
     })
     assert.equal(created.secret, 'gk_one-time-secret')
     await revokeAPIKey('admin-key', created.id)
@@ -187,10 +188,12 @@ test('API key management service authenticates requests and exposes lifecycle op
       permissions: ['read'],
       requestsPerWindow: 20,
       windowSeconds: 30,
+      burst: 2,
     })
     assert.equal(calls.length, 6)
     assert.ok(calls.every(({ init }) => init?.headers?.['X-API-Key'] === 'admin-key'))
     assert.equal(JSON.parse(calls[3].init.body).requestsPerWindow, 50)
+    assert.equal(JSON.parse(calls[3].init.body).burst, 5)
     assert.equal(calls[4].init.method, 'DELETE')
     assert.equal(calls[5].init.method, 'PATCH')
   } finally { globalThis.fetch = original }
@@ -254,7 +257,7 @@ test('backend management service lists, registers, updates, and removes nodes', 
 test('route management service persists routing and authentication controls', async () => {
   const original = globalThis.fetch
   const calls = []
-  const route = { id: 'route-1', name: 'Orders', pathPrefix: '/api/orders', methods: ['GET', 'POST'], backendId: 'backend-1', backendName: 'orders', authRequired: true, enabled: true }
+  const route = { id: 'route-1', name: 'Orders', pathPrefix: '/api/orders', methods: ['GET', 'POST'], backendId: 'backend-1', backendName: 'orders', authRequired: true, enabled: true, requestsPerWindow: 20, windowSeconds: 60, burst: 3 }
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init })
     if (init?.method === 'DELETE') return new Response(null, { status: 204 })
@@ -268,5 +271,6 @@ test('route management service persists routing and authentication controls', as
     assert.deepEqual(calls.map(call => call.init?.method || 'GET'), ['GET', 'POST', 'PUT', 'DELETE'])
     assert.ok(calls.every(call => call.init?.headers?.['X-API-Key'] === 'admin-key'))
     assert.equal(JSON.parse(calls[2].init.body).authRequired, false)
+    assert.equal(JSON.parse(calls[2].init.body).burst, 3)
   } finally { globalThis.fetch = original }
 })

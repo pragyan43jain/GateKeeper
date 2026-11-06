@@ -42,6 +42,23 @@ type PolicyRateLimiter interface {
 	AllowWithPolicy(ctx context.Context, identity string, limit int64, window time.Duration) (RateLimitResult, error)
 }
 
+type BurstPolicyRateLimiter interface {
+	AllowWithPolicyAndBurst(ctx context.Context, identity string, limit int64, window time.Duration, burst int64) (RateLimitResult, error)
+}
+
+func allowWithPolicy(ctx context.Context, limiter RateLimiter, identity string, limit int64, window time.Duration, burst int64) (RateLimitResult, error) {
+	if withBurst, ok := limiter.(BurstPolicyRateLimiter); ok {
+		return withBurst.AllowWithPolicyAndBurst(ctx, identity, limit, window, burst)
+	}
+	if burst != 0 {
+		return RateLimitResult{}, errors.New("rate limiter does not support burst policies")
+	}
+	if withPolicy, ok := limiter.(PolicyRateLimiter); ok {
+		return withPolicy.AllowWithPolicy(ctx, identity, limit, window)
+	}
+	return RateLimitResult{}, errors.New("rate limiter does not support policy limits")
+}
+
 // RateLimitResult contains the outcome of a rate limit check.
 type RateLimitResult struct {
 	Allowed    bool
@@ -56,7 +73,8 @@ var rateLimitScript = redis.NewScript(`
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local windowMs = tonumber(ARGV[2])
-local member = ARGV[3]
+local burst = tonumber(ARGV[3])
+local member = ARGV[4]
 local clock = redis.call('TIME')
 local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now - windowMs)
@@ -64,7 +82,7 @@ local current = redis.call('ZCARD', key)
 local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
 local retry = 1
 if #oldest > 0 then retry = math.max(1, math.ceil((tonumber(oldest[2]) + windowMs - now) / 1000)) end
-if current >= limit then return {0, current, retry} end
+if current >= limit + burst then return {0, current, retry} end
 redis.call('ZADD', key, now, member)
 redis.call('PEXPIRE', key, windowMs + 1000)
 current = current + 1
@@ -97,9 +115,16 @@ func (r *RedisRateLimiter) Allow(ctx context.Context, identity string) (RateLimi
 }
 
 func (r *RedisRateLimiter) AllowWithPolicy(ctx context.Context, identity string, limit int64, window time.Duration) (RateLimitResult, error) {
+	return r.AllowWithPolicyAndBurst(ctx, identity, limit, window, 0)
+}
+
+func (r *RedisRateLimiter) AllowWithPolicyAndBurst(ctx context.Context, identity string, limit int64, window time.Duration, burst int64) (RateLimitResult, error) {
 	key := r.prefix + identity
 	if limit <= 0 {
 		return RateLimitResult{}, errors.New("rate limit must be greater than zero")
+	}
+	if burst < 0 || burst > 1_000_000 || limit > int64(^uint64(0)>>1)-burst {
+		return RateLimitResult{}, errors.New("rate limit burst must be 0..1000000 and must not overflow the effective quota")
 	}
 	windowMs := window.Milliseconds()
 	if windowMs <= 0 {
@@ -112,7 +137,7 @@ func (r *RedisRateLimiter) AllowWithPolicy(ctx context.Context, identity string,
 	if _, err := rand.Read(requestID[:]); err != nil {
 		return RateLimitResult{}, fmt.Errorf("generate rate limit event identifier: %w", err)
 	}
-	res, err := rateLimitScript.Run(ctx, r.client, []string{key}, limit, windowMs, hex.EncodeToString(requestID[:])).Int64Slice()
+	res, err := rateLimitScript.Run(ctx, r.client, []string{key}, limit, windowMs, burst, hex.EncodeToString(requestID[:])).Int64Slice()
 	if err != nil {
 		return RateLimitResult{}, err
 	}
@@ -129,6 +154,7 @@ func (r *RedisRateLimiter) AllowWithPolicy(ctx context.Context, identity string,
 		ttl = 1
 	}
 
+	limit += burst
 	remaining := limit - current
 	if remaining < 0 {
 		remaining = 0
@@ -2076,28 +2102,19 @@ func newGatewayHandlerWithOptions(apiKey string, proxy http.Handler, limiter Rat
 		var limitErr error
 		if limiter != nil {
 			if principal != nil {
-				if policyLimiter, ok := limiter.(PolicyRateLimiter); ok {
-					window := time.Duration(principal.WindowSeconds) * time.Second
-					res, limitErr = policyLimiter.AllowWithPolicy(r.Context(), "managed:"+principal.ID, int64(principal.RequestsPerWindow), window)
-				} else {
-					res, limitErr = limiter.Allow(r.Context(), keyHash)
-				}
+				window := time.Duration(principal.WindowSeconds) * time.Second
+				res, limitErr = allowWithPolicy(r.Context(), limiter, "managed:"+principal.ID, int64(principal.RequestsPerWindow), window, int64(principal.Burst))
 			} else {
 				res, limitErr = limiter.Allow(r.Context(), keyHash)
 			}
 		}
 		if limiter != nil && limitErr == nil && routeMatched && route.RequestsPerWindow > 0 {
-			policyLimiter, ok := limiter.(PolicyRateLimiter)
-			if !ok {
-				limitErr = errors.New("rate limiter does not support route policies")
-			} else {
-				routeIdentity := "route:" + route.ID + ":" + keyHash
-				var routeResult RateLimitResult
-				routeResult, limitErr = policyLimiter.AllowWithPolicy(r.Context(), routeIdentity,
-					int64(route.RequestsPerWindow), time.Duration(route.WindowSeconds)*time.Second)
-				if limitErr == nil {
-					res = routeResult
-				}
+			routeIdentity := "route:" + route.ID + ":" + keyHash
+			var routeResult RateLimitResult
+			routeResult, limitErr = allowWithPolicy(r.Context(), limiter, routeIdentity,
+				int64(route.RequestsPerWindow), time.Duration(route.WindowSeconds)*time.Second, int64(route.Burst))
+			if limitErr == nil {
+				res = routeResult
 			}
 		}
 
