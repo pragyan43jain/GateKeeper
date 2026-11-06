@@ -38,6 +38,9 @@ and Docker stack. The student endpoint is sample data, not a persistent student 
 - Add bounded burst allowances to API-key and route policies, persist and propagate them, and enforce the combined quota atomically in the existing Redis sliding-window script.
 - Add opt-in bounded transport retries for body-replayable idempotent HTTP methods, preserving per-backend circuit-breaker accounting and request cancellation.
 - Persist backend health state transitions and failure reasons with a 100-event per-backend retention bound; expose them through a protected API and the Upstream Nodes console.
+- Emit JSON logs from both `slog` and the standard logger, and allow the Caddy ingress host ports to be overridden for isolated local acceptance deployments.
+- Provision a Grafana Prometheus datasource and an operations dashboard backed by the gateway's actual request, latency, rate-limit, health, and breaker metrics.
+- Record request totals by gateway-selected backend, status code, and method with a bounded backend identity label, and visualize backend distribution in Grafana.
 
 ## Repeatable validation
 
@@ -56,15 +59,18 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 
 ## Verified in this workspace
 
-- `make check` passes with `TEST_DATABASE_URL` set, including Go race tests, `go vet`, frontend build/lint, 13 frontend service tests, and the PostgreSQL integration test.
-- Frontend TypeScript production build, lint, and all 13 service tests pass. The frontend build reports a non-blocking large-chunk warning.
+- `make check` passes with `TEST_DATABASE_URL` set, including Go race tests, `go vet`, frontend build/lint, 14 frontend service tests, and the PostgreSQL integration test.
+- Frontend TypeScript production build, lint, and all 14 service tests pass. The frontend build reports a non-blocking large-chunk warning.
 - `docker compose config --quiet` and `docker compose build gateway` pass.
 - Redis sliding-window boundary, quota, and concurrency tests pass against the configured local Redis service.
-- PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all five migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
+- PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all six migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
 - PostgreSQL replica synchronization integration passes for backend add/maintenance, route create/policy/disable, and load-balancing strategy/weight updates. `make check` passes after these changes.
-- Burst allowance checks pass against Redis; fresh PostgreSQL integration verifies API-key policy update and route policy persistence/replica propagation with burst values. Dashboard build, lint, and all 13 frontend tests pass.
+- Burst allowance checks pass against Redis; fresh PostgreSQL integration verifies API-key policy update and route policy persistence/replica propagation with burst values. Dashboard build, lint, and all 14 frontend tests pass.
 - Retry transport tests pass for transient failures, unsafe-method suppression, and non-retry of upstream HTTP error responses.
 - PostgreSQL integration verifies unhealthy, recovering, and healthy transition history, and the dashboard health-history API service passes its frontend test.
+- A fresh isolated Compose deployment passes the expanded Caddy ingress acceptance, including key and route burst limits, protected health-history retrieval, and a live backend stop/recovery while healthy-peer traffic continues. Isolated resources are removed after the run.
+- JSON logging regression coverage passes for both `slog` fields and legacy standard-library log messages.
+- Grafana provisions the operations dashboard and reports seven panels through the isolated Caddy ingress; gateway container logs parse as JSON. Compose accepts all dashboard/provisioning mounts.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
 ## Latest acceptance and remaining work

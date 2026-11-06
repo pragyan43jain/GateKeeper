@@ -535,6 +535,53 @@ func TestMetrics_RequestCountingAndLatency(t *testing.T) {
 	}
 }
 
+func TestMetricsTrackRequestsByConfiguredBackend(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := NewBackendNode(target, nil, http.DefaultTransport)
+	pool, err := NewBackendPool([]*BackendNode{node})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := NewGatewayMetrics(prometheus.NewRegistry())
+	handler := newGatewayHandlerWithOptions(testAPIKey, pool, &mockLimiterAllowed{}, WithMetrics(metrics))
+	request := httptest.NewRequest(http.MethodGet, "/api/students", nil)
+	request.Header.Set("X-API-Key", testAPIKey)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("gateway request status=%d: %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("X-GateKeeper-Selected-Backend") != "" {
+		t.Fatal("internal backend metric label leaked to the client")
+	}
+	families, err := metrics.registry.Gather()
+	if err != nil {
+		t.Fatalf("gather gateway metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != "gateway_backend_requests_total" {
+			continue
+		}
+		for _, sample := range family.GetMetric() {
+			labels := make(map[string]string)
+			for _, label := range sample.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["backend"] == node.Name() && labels["code"] == "200" && labels["method"] == "GET" && sample.GetCounter().GetValue() == 1 {
+				return
+			}
+		}
+	}
+	t.Fatalf("per-backend request metric missing for %s", node.Name())
+}
+
 // TestMetrics_RateLimitRejectionCount verifies that rate limit rejections (429) are tracked.
 func TestMetrics_RateLimitRejectionCount(t *testing.T) {
 	reg := prometheus.NewRegistry()

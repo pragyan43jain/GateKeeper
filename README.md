@@ -69,6 +69,9 @@ flowchart TD
 - **Configurable Upstream Timeouts**: Gateway enforces bounded upstream `ResponseHeaderTimeout` (`BACKEND_TIMEOUT`, default: 10s). Slow or deadlocked backends are terminated with `502 Bad Gateway` and counted toward circuit breaker failure thresholds rather than hanging client connections indefinitely.
 - **Bounded Upstream Retries**: `UPSTREAM_MAX_RETRIES` (default `0`, maximum `5`) and `UPSTREAM_RETRY_BACKOFF` configure transport-error retries for replayable GET, HEAD, OPTIONS, PUT, and DELETE requests. POST and other non-idempotent methods are never retried; HTTP responses such as 5xx are returned without retry. Retries run inside each backend's circuit breaker and honor request cancellation and the upstream timeout.
 - **Credential Privacy**: Derives a deterministic SHA-256 hash from incoming API keys. Raw keys are never stored in Redis, printed to logs, or exposed.
+- **Machine-Readable Gateway Logs**: Gateway `slog` events and legacy standard-library logs are emitted as JSON records to container stdout.
+- **Provisioned Grafana Operations Dashboard**: Compose provisions a Prometheus datasource and a GateKeeper dashboard for throughput, 5xx rate, p95 latency, rate-limit rejections, backend health, and circuit-breaker state.
+- **Backend Traffic Distribution Metrics**: Request totals include configured backend, status code, and method labels; the label source is the gateway-selected node, not an arbitrary upstream-provided value.
 - **Fail-Safe Design**: Returns `HTTP 503 Service Unavailable` if Redis is unreachable—never silently bypassing rate limits.
 - **Interactive Monitoring Dashboard**: React + TypeScript + Vite single-page application served via a multi-stage Caddy container, featuring real-time telemetry, backend circuit breaker states, and an interactive API playground.
 - **Scoped Telemetry Ingress**: Prometheus query access through the edge proxy is strictly restricted to query endpoints (`/prometheus/api/v1/query` and `/query_range`) used by the dashboard. Public `/metrics` and administrative Prometheus endpoints are blocked with `403 Forbidden`; Prometheus scrapes the gateway internally.
@@ -89,7 +92,7 @@ flowchart TD
 | **Cache / Token Store** | Redis 7 (`redis:7-alpine`) | In-memory token counter with AOF persistence and password auth |
 | **Management Database** | PostgreSQL 17 (`postgres:17-alpine`) | Persistent management schema and migration history; no rate-limit counters |
 | **Metrics Collection** | Prometheus (`prom/prometheus:latest`) | Internal gateway scrape with scoped dashboard queries |
-| **Visualization** | Grafana (`grafana/grafana:latest`) | Analytics dashboard provisioned with Prometheus data source |
+| **Visualization** | Grafana (`grafana/grafana:latest`) | Provisioned Prometheus datasource and GateKeeper operations dashboard |
 | **Containerization** | Docker & Docker Compose v2 | Multi-container orchestrated deployment with logging limits |
 
 ---

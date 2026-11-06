@@ -570,6 +570,10 @@ type BackendNode struct {
 
 // NewBackendNode constructs a new BackendNode with its own ReverseProxy, CircuitBreaker, and health state.
 func NewBackendNode(target *url.URL, cb *CircuitBreaker, transport http.RoundTripper) *BackendNode {
+	name := target.Host
+	if name == "" {
+		name = target.String()
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = transport
 	if cb != nil {
@@ -582,6 +586,9 @@ func NewBackendNode(target *url.URL, cb *CircuitBreaker, transport http.RoundTri
 		req.Header.Del("X-API-Key")
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		// Keep the upstream's client-visible X-Backend-Id intact. This private
+		// header is consumed by statusResponseWriter for trusted metric labels.
+		resp.Header.Set("X-GateKeeper-Selected-Backend", name)
 		if resp.Request != nil {
 			if requestID := resp.Request.Header.Get("X-Request-ID"); requestID != "" {
 				// Keep the client-visible ID aligned with the gateway's request record,
@@ -592,10 +599,6 @@ func NewBackendNode(target *url.URL, cb *CircuitBreaker, transport http.RoundTri
 		return nil
 	}
 
-	name := target.Host
-	if name == "" {
-		name = target.String()
-	}
 	if cb != nil {
 		cb.SetName(name)
 	}
@@ -1390,6 +1393,7 @@ type statusResponseWriter struct {
 	http.ResponseWriter
 	statusCode  int
 	wroteHeader bool
+	backendName string
 }
 
 func newStatusResponseWriter(w http.ResponseWriter) *statusResponseWriter {
@@ -1407,6 +1411,8 @@ func (rw *statusResponseWriter) WriteHeader(code int) {
 	if !rw.wroteHeader {
 		rw.statusCode = code
 		rw.wroteHeader = true
+		rw.backendName = rw.Header().Get("X-GateKeeper-Selected-Backend")
+		rw.Header().Del("X-GateKeeper-Selected-Backend")
 		rw.ResponseWriter.WriteHeader(code)
 	}
 }
@@ -1437,6 +1443,7 @@ func (rw *statusResponseWriter) Unwrap() http.ResponseWriter {
 type GatewayMetrics struct {
 	registry                   *prometheus.Registry
 	requestsTotal              *prometheus.CounterVec
+	backendRequestsTotal       *prometheus.CounterVec
 	requestDuration            *prometheus.HistogramVec
 	rateLimitRejections        prometheus.Counter
 	rateLimitErrors            prometheus.Counter
@@ -1464,6 +1471,13 @@ func NewGatewayMetrics(reg *prometheus.Registry) *GatewayMetrics {
 				Help: "Total number of HTTP requests processed by Gatekeeper by status code and method.",
 			},
 			[]string{"code", "method"},
+		),
+		backendRequestsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_backend_requests_total",
+				Help: "Total application requests handled by each configured backend, by status code and method.",
+			},
+			[]string{"backend", "code", "method"},
 		),
 		requestDuration: prometheus.NewHistogramVec(
 			prometheus.HistogramOpts{
@@ -1543,6 +1557,7 @@ func NewGatewayMetrics(reg *prometheus.Registry) *GatewayMetrics {
 	m.circuitBreakerState.Set(float64(StateClosed))
 	reg.MustRegister(
 		m.requestsTotal,
+		m.backendRequestsTotal,
 		m.requestDuration,
 		m.rateLimitRejections,
 		m.rateLimitErrors,
@@ -1576,6 +1591,11 @@ func (m *GatewayMetrics) InstrumentHandler(next http.Handler) http.Handler {
 		code := strconv.Itoa(srw.statusCode)
 		m.requestsTotal.WithLabelValues(code, r.Method).Inc()
 		m.requestDuration.WithLabelValues(code, r.Method).Observe(duration)
+		backend := srw.backendName
+		if backend == "" {
+			backend = "gateway"
+		}
+		m.backendRequestsTotal.WithLabelValues(backend, code, r.Method).Inc()
 
 		if srw.statusCode == http.StatusTooManyRequests {
 			m.rateLimitRejections.Inc()
@@ -2454,7 +2474,7 @@ func applyBackendWeights(pool *BackendPool, raw string) error {
 }
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	configureJSONLogging(os.Stdout)
 	traceShutdown, err := initializeTracing(context.Background())
 	if err != nil {
 		log.Fatalf("tracing initialization failed: %v", err)
