@@ -34,6 +34,7 @@ and Docker stack. The student endpoint is sample data, not a persistent student 
 - Add administrator user and role management, protect the last administrator from demotion/removal, and include login/logout controls in the console.
 - Add a secure first-run dashboard setup/login screen and optional environment-based initial administrator creation.
 - Add sliding-window boundary coverage for Redis rate limiting.
+- Synchronize persisted backend, route, and load-balancing configuration across gateway replicas every two seconds, preserving the last active configuration during database errors and serializing updates with local management mutations.
 
 ## Repeatable validation
 
@@ -57,6 +58,7 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - `docker compose config --quiet` and `docker compose build gateway` pass.
 - Redis sliding-window boundary, quota, and concurrency tests pass against the configured local Redis service.
 - PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all four migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
+- PostgreSQL replica synchronization integration passes for backend add/maintenance, route create/policy/disable, and load-balancing strategy/weight updates. `make check` passes after these changes.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
 ## Latest acceptance and remaining work
@@ -65,4 +67,4 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - OpenTelemetry OTLP export and parent-context propagation pass a collector integration test. Four Prometheus alert rules pass promtool validation. External alert delivery still requires an operator-configured receiver.
 - The isolated Compose acceptance and k6 runs pass; measurements and limits are recorded in scripts/LOAD_TESTING.md.
 - Verified key lifecycle, two-backend distribution, throttling, Inspector correlation, protected metrics, logout, and active backend failure/recovery through the isolated Compose ingress.
-- Remaining product gaps include configuration synchronization across replicas, burst controls, configurable retry policies, backend health history, and a complete final acceptance review. The full original product vision is not yet complete.
+- Remaining product gaps include burst controls, configurable retry policies, backend health history, and a complete final acceptance review. The full original product vision is not yet complete.

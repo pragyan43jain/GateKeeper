@@ -66,7 +66,10 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 			}
 		}
 	}
-	var backendMutationMu sync.Mutex
+	backendMutationMu := &sync.Mutex{}
+	if pool != nil {
+		backendMutationMu = &pool.managementMu
+	}
 	mux.HandleFunc("/api/users", protect(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -517,6 +520,8 @@ func registerManagementRoutes(mux *http.ServeMux, store *ManagementStore, pool *
 		}
 	}))
 	mux.HandleFunc("/api/settings/load-balancing", protect(func(w http.ResponseWriter, r *http.Request) {
+		backendMutationMu.Lock()
+		defer backendMutationMu.Unlock()
 		if pool == nil {
 			http.Error(w, "Backend pool is unavailable", http.StatusServiceUnavailable)
 			return

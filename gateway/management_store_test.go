@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", description)
+}
+
 func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -129,6 +141,16 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err := bootstrapManagedBackends(ctx, store, pool); err != nil {
 		t.Fatalf("bootstrap persisted backends: %v", err)
 	}
+	// A second independently constructed gateway must converge on management
+	// changes from this instance without a process restart.
+	peerURL, _ := url.Parse("http://127.0.0.1:9")
+	peerPool, err := NewBackendPool([]*BackendNode{NewBackendNode(peerURL, nil, http.DefaultTransport)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerRoutes := NewRouteRegistry(peerPool)
+	stopSync := startConfigurationSync(store, peerPool, peerRoutes)
+	t.Cleanup(stopSync)
 	initialBackendCount := len(pool.Nodes())
 	policyLimiter := &capturingPolicyLimiter{}
 	adminEmail := "integration-" + time.Now().Format("150405.000000000") + "@example.test"
@@ -258,6 +280,14 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err := json.Unmarshal(addBackendResponse.Body.Bytes(), &managedBackend); err != nil || managedBackend.ID == "" {
 		t.Fatalf("decode created backend: backend=%+v err=%v", managedBackend, err)
 	}
+	waitFor(t, 6*time.Second, func() bool {
+		for _, peerNode := range peerPool.Nodes() {
+			if peerNode.configID == managedBackend.ID {
+				return true
+			}
+		}
+		return false
+	}, "peer gateway to add the managed backend")
 	maintenanceRequest := httptest.NewRequest(http.MethodPut, "/api/backends/"+managedBackend.ID, strings.NewReader(`{"maintenance":true}`))
 	withAdminSession(maintenanceRequest)
 	maintenanceResponse := httptest.NewRecorder()
@@ -274,6 +304,14 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if selectedMaintenanceTest == nil || !selectedMaintenanceTest.maintenance.Load() {
 		t.Fatalf("backend maintenance was not applied to live pool")
 	}
+	waitFor(t, 6*time.Second, func() bool {
+		for _, peerNode := range peerPool.Nodes() {
+			if peerNode.configID == managedBackend.ID && peerNode.maintenance.Load() {
+				return true
+			}
+		}
+		return false
+	}, "peer gateway to apply backend maintenance")
 	backendsRequest := httptest.NewRequest(http.MethodGet, "/api/backends", nil)
 	withAdminSession(backendsRequest)
 	backendsResponse := httptest.NewRecorder()
@@ -300,6 +338,10 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err := json.Unmarshal(createRouteResponse.Body.Bytes(), &managedRoute); err != nil || managedRoute.ID == "" {
 		t.Fatalf("decode created route: route=%+v err=%v", managedRoute, err)
 	}
+	waitFor(t, 6*time.Second, func() bool {
+		route, matched, allowed := peerRoutes.Match("/api/integration/items", http.MethodGet)
+		return matched && allowed && route.ID == managedRoute.ID && route.BackendID == managedBackend.ID
+	}, "peer gateway to install the managed route")
 	publicRouteRequest := httptest.NewRequest(http.MethodGet, "/api/integration/items", nil)
 	publicRouteResponse := httptest.NewRecorder()
 	handler.ServeHTTP(publicRouteResponse, publicRouteRequest)
@@ -316,6 +358,10 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if updateRoutePolicyResponse.Code != http.StatusOK {
 		t.Fatalf("route policy update status=%d: %s", updateRoutePolicyResponse.Code, updateRoutePolicyResponse.Body.String())
 	}
+	waitFor(t, 6*time.Second, func() bool {
+		route, matched, _ := peerRoutes.Match("/api/integration/items", http.MethodGet)
+		return matched && route.ID == managedRoute.ID && route.RequestsPerWindow == 6 && route.WindowSeconds == 45
+	}, "peer gateway to apply the updated route policy")
 	publicRouteAfterPolicyUpdate := httptest.NewRecorder()
 	handler.ServeHTTP(publicRouteAfterPolicyUpdate, httptest.NewRequest(http.MethodGet, "/api/integration/items", nil))
 	if publicRouteAfterPolicyUpdate.Code != http.StatusOK || policyLimiter.limit != 6 || policyLimiter.window != 45*time.Second || managedBackendCalls != 2 {
@@ -335,6 +381,10 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if disableRouteResponse.Code != http.StatusOK {
 		t.Fatalf("route disable status=%d: %s", disableRouteResponse.Code, disableRouteResponse.Body.String())
 	}
+	waitFor(t, 6*time.Second, func() bool {
+		_, matched, _ := peerRoutes.Match("/api/integration/items", http.MethodGet)
+		return !matched
+	}, "peer gateway to disable the managed route")
 	disabledRouteRequest := httptest.NewRequest(http.MethodGet, "/api/integration/items", nil)
 	disabledRouteResponse := httptest.NewRecorder()
 	handler.ServeHTTP(disabledRouteResponse, disabledRouteRequest)
@@ -377,6 +427,16 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if err != nil || !foundSettings || settings.Strategy != StrategyWeightedRoundRobin || settings.Weights[node.Name()] != 3 {
 		t.Fatalf("load persisted balancing settings = %+v found=%v err=%v", settings, foundSettings, err)
 	}
+	waitFor(t, 6*time.Second, func() bool {
+		var peerNode *BackendNode
+		for _, candidate := range peerPool.Nodes() {
+			if candidate.Name() == node.Name() {
+				peerNode = candidate
+				break
+			}
+		}
+		return peerPool.Strategy() == StrategyWeightedRoundRobin && peerNode != nil && peerPool.Weight(peerNode) == 3
+	}, "peer gateway to apply load-balancing settings")
 	auditRequest := httptest.NewRequest(http.MethodGet, "/api/audit-logs?limit=10", nil)
 	withAdminSession(auditRequest)
 	auditResponse := httptest.NewRecorder()

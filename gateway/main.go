@@ -769,6 +769,7 @@ const (
 )
 
 type BackendPool struct {
+	managementMu  sync.Mutex
 	nodes         atomic.Pointer[backendNodeSet]
 	idx           atomic.Uint64
 	configureMu   sync.Mutex
@@ -2576,6 +2577,8 @@ func main() {
 		log.Fatalf("request history restore failed: %v", err)
 	}
 	defer stopHistory()
+	stopConfigSync := startConfigurationSync(NewManagementStore(managementDB), pool, routeRegistry)
+	defer stopConfigSync()
 
 	gwHandler := newGatewayHandlerWithOptions(
 		apiKey,
