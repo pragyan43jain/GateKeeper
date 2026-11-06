@@ -2327,6 +2327,21 @@ func parseEnvIntPositive(key string, defaultVal int) (int, error) {
 	return i, nil
 }
 
+func parseEnvIntRange(key string, defaultVal, minimum, maximum int) (int, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultVal, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value %q: %w", key, value, err)
+	}
+	if parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be between %d and %d, got %d", key, minimum, maximum, parsed)
+	}
+	return parsed, nil
+}
+
 func parseEnvDurationPositive(key string, defaultVal time.Duration) (time.Duration, error) {
 	val := os.Getenv(key)
 	if val == "" {
@@ -2475,14 +2490,26 @@ func main() {
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
+	upstreamRetries, err := parseEnvIntRange("UPSTREAM_MAX_RETRIES", 0, 0, 5)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
+	retryBackoff, err := parseEnvDurationPositive("UPSTREAM_RETRY_BACKOFF", 100*time.Millisecond)
+	if err != nil {
+		log.Fatalf("configuration error: %v", err)
+	}
 
 	backendTransport := http.DefaultTransport.(*http.Transport).Clone()
 	backendTransport.ResponseHeaderTimeout = backendTimeout
+	configuredBackendTransport := http.RoundTripper(backendTransport)
+	if upstreamRetries > 0 {
+		configuredBackendTransport = &RetryTransport{Base: backendTransport, MaxRetries: upstreamRetries, Backoff: retryBackoff}
+	}
 
 	nodes := make([]*BackendNode, 0, len(backendURLs))
 	for _, u := range backendURLs {
 		cb := NewCircuitBreaker(cbThreshold, cbCooldown)
-		node := NewBackendNode(u, cb, backendTransport)
+		node := NewBackendNode(u, cb, configuredBackendTransport)
 		nodes = append(nodes, node)
 	}
 

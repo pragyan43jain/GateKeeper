@@ -36,6 +36,7 @@ and Docker stack. The student endpoint is sample data, not a persistent student 
 - Add sliding-window boundary coverage for Redis rate limiting.
 - Synchronize persisted backend, route, and load-balancing configuration across gateway replicas every two seconds, preserving the last active configuration during database errors and serializing updates with local management mutations.
 - Add bounded burst allowances to API-key and route policies, persist and propagate them, and enforce the combined quota atomically in the existing Redis sliding-window script.
+- Add opt-in bounded transport retries for body-replayable idempotent HTTP methods, preserving per-backend circuit-breaker accounting and request cancellation.
 
 ## Repeatable validation
 
@@ -61,6 +62,7 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - PostgreSQL integration passes against a fresh disposable PostgreSQL 17 database, including all five migrations, first-admin setup, login/logout, role checks, protected metrics, and last-admin safeguards.
 - PostgreSQL replica synchronization integration passes for backend add/maintenance, route create/policy/disable, and load-balancing strategy/weight updates. `make check` passes after these changes.
 - Burst allowance checks pass against Redis; fresh PostgreSQL integration verifies API-key policy update and route policy persistence/replica propagation with burst values. Dashboard build, lint, and all 13 frontend tests pass.
+- Retry transport tests pass for transient failures, unsafe-method suppression, and non-retry of upstream HTTP error responses.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
 ## Latest acceptance and remaining work
@@ -69,4 +71,4 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - OpenTelemetry OTLP export and parent-context propagation pass a collector integration test. Four Prometheus alert rules pass promtool validation. External alert delivery still requires an operator-configured receiver.
 - The isolated Compose acceptance and k6 runs pass; measurements and limits are recorded in scripts/LOAD_TESTING.md.
 - Verified key lifecycle, two-backend distribution, throttling, Inspector correlation, protected metrics, logout, and active backend failure/recovery through the isolated Compose ingress.
-- Remaining product gaps include configurable retry policies, backend health history, and a complete final acceptance review. The full original product vision is not yet complete.
+- Remaining product gaps include backend health history and a complete final acceptance review. The full original product vision is not yet complete.
