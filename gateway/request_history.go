@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"sort"
 	"time"
 )
 
@@ -66,4 +67,75 @@ func startRequestHistory(store *ManagementStore, logger *RequestLogger, instance
 		}
 	}()
 	return func() { close(stop); <-done }, nil
+}
+
+// ListRequestHistoryEntries merges the bounded snapshots written by all gateway
+// instances. IDs de-duplicate a local in-memory record against its last snapshot.
+func (s *ManagementStore) ListRequestHistoryEntries(ctx context.Context) ([]RequestLogEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT entries FROM request_history_snapshots ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]RequestLogEntry, 0)
+	seen := make(map[string]struct{})
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var snapshot []RequestLogEntry
+		if err := json.Unmarshal(data, &snapshot); err != nil {
+			return nil, err
+		}
+		for _, entry := range snapshot {
+			if entry.ID == "" {
+				continue
+			}
+			if _, exists := seen[entry.ID]; exists {
+				continue
+			}
+			seen[entry.ID] = struct{}{}
+			entries = append(entries, entry)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		left, leftErr := time.Parse(time.RFC3339Nano, entries[i].Timestamp)
+		right, rightErr := time.Parse(time.RFC3339Nano, entries[j].Timestamp)
+		if leftErr != nil || rightErr != nil {
+			return entries[i].Timestamp > entries[j].Timestamp
+		}
+		return left.After(right)
+	})
+	return entries, nil
+}
+
+func mergeRequestLogEntries(preferred, fallback []RequestLogEntry) []RequestLogEntry {
+	entries := make([]RequestLogEntry, 0, len(preferred)+len(fallback))
+	seen := make(map[string]struct{}, len(preferred)+len(fallback))
+	for _, group := range [][]RequestLogEntry{preferred, fallback} {
+		for _, entry := range group {
+			if entry.ID == "" {
+				continue
+			}
+			if _, exists := seen[entry.ID]; exists {
+				continue
+			}
+			seen[entry.ID] = struct{}{}
+			entries = append(entries, entry)
+		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		left, leftErr := time.Parse(time.RFC3339Nano, entries[i].Timestamp)
+		right, rightErr := time.Parse(time.RFC3339Nano, entries[j].Timestamp)
+		if leftErr != nil || rightErr != nil {
+			return entries[i].Timestamp > entries[j].Timestamp
+		}
+		return left.After(right)
+	})
+	return entries
 }

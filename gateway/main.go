@@ -1659,36 +1659,38 @@ func (l *RequestLogger) GetEntries(limit int, statusFilter int, methodFilter str
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	if limit <= 0 || limit > l.count {
-		limit = l.count
+	entries := make([]RequestLogEntry, 0, l.count)
+	for i := 0; i < l.count; i++ {
+		idx := (l.cursor - 1 - i + l.capacity) % l.capacity
+		entries = append(entries, l.entries[idx])
 	}
+	return filterRequestLogEntries(entries, limit, statusFilter, methodFilter, search)
+}
 
-	result := make([]RequestLogEntry, 0, limit)
+func filterRequestLogEntries(entries []RequestLogEntry, limit, statusFilter int, methodFilter, search string) []RequestLogEntry {
 	methodFilter = strings.ToUpper(strings.TrimSpace(methodFilter))
 	search = strings.ToLower(strings.TrimSpace(search))
-
-	// Iterate backwards from newest to oldest
-	for i := 0; i < l.count && len(result) < limit; i++ {
-		idx := (l.cursor - 1 - i + l.capacity) % l.capacity
-		entry := l.entries[idx]
-
+	if limit <= 0 {
+		limit = len(entries)
+	}
+	result := make([]RequestLogEntry, 0, min(limit, len(entries)))
+	for _, entry := range entries {
 		if statusFilter > 0 && entry.Status != statusFilter {
 			continue
 		}
 		if methodFilter != "" && entry.Method != methodFilter {
 			continue
 		}
-		if search != "" {
-			if !strings.Contains(strings.ToLower(entry.ID), search) &&
-				!strings.Contains(strings.ToLower(entry.Path), search) &&
-				!strings.Contains(strings.ToLower(entry.Backend), search) {
-				continue
-			}
+		if search != "" && !strings.Contains(strings.ToLower(entry.ID), search) &&
+			!strings.Contains(strings.ToLower(entry.Path), search) &&
+			!strings.Contains(strings.ToLower(entry.Backend), search) {
+			continue
 		}
-
 		result = append(result, entry)
+		if len(result) >= limit {
+			break
+		}
 	}
-
 	return result
 }
 
@@ -1945,6 +1947,20 @@ func newGatewayHandlerWithOptions(apiKey string, proxy http.Handler, limiter Rat
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if limiter != nil {
+			result, err := allowManagementRequest(r.Context(), limiter, "management-requests:"+hashAPIKey(principal.ID))
+			if err != nil {
+				http.Error(w, "Request history rate limiter unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if !result.Allowed {
+				w.Header().Set("Retry-After", strconv.FormatInt(result.RetryAfter, 10))
+				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("X-RateLimit-Limit", strconv.FormatInt(result.Limit, 10))
+			w.Header().Set("X-RateLimit-Remaining", strconv.FormatInt(result.Remaining, 10))
+		}
 
 		limit := 50
 		if lStr := r.URL.Query().Get("limit"); lStr != "" {
@@ -1967,6 +1983,17 @@ func newGatewayHandlerWithOptions(apiKey string, proxy http.Handler, limiter Rat
 		search := r.URL.Query().Get("search")
 
 		entries := cfg.logger.GetEntries(limit, statusFilter, methodFilter, search)
+		if cfg.managementStore != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			sharedEntries, err := cfg.managementStore.ListRequestHistoryEntries(ctx)
+			cancel()
+			if err != nil {
+				http.Error(w, "Request history is temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			combined := mergeRequestLogEntries(entries, sharedEntries)
+			entries = filterRequestLogEntries(combined, limit, statusFilter, methodFilter, search)
+		}
 		if entries == nil {
 			entries = []RequestLogEntry{}
 		}

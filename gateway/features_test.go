@@ -549,6 +549,22 @@ func TestRequestInspector_EndpointFiltersAndAuth(t *testing.T) {
 	}
 }
 
+func TestRequestInspectorEndpointUsesManagementRateLimit(t *testing.T) {
+	handler := newGatewayHandlerWithOptions(
+		testAPIKey,
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		&mockLimiterBlocked{retryAfter: 7},
+		WithRequestLogger(NewRequestLogger(10)),
+	)
+	request := httptest.NewRequest(http.MethodGet, "/api/requests", nil)
+	request.Header.Set("X-API-Key", testAPIKey)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "7" {
+		t.Fatalf("Inspector rate-limit response status=%d retry-after=%q", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
 func TestBackendHealth_HealthyRemainsAvailable(t *testing.T) {
 	u, _ := url.Parse("http://localhost:8081")
 	node := NewBackendNode(u, nil, http.DefaultTransport)

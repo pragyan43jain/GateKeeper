@@ -91,6 +91,20 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	if len(entries) != 2 || entries[0].ID != "newest" || entries[1].ID != "retained" {
 		t.Fatalf("history restore ordering/bound: %+v", entries)
 	}
+	peerHistory := NewRequestLogger(4)
+	stopPeerHistory, err := startRequestHistory(store, peerHistory, "integration-peer-history")
+	if err != nil {
+		t.Fatalf("start peer history snapshot: %v", err)
+	}
+	peerHistory.Record(RequestLogEntry{ID: "peer-only", Method: "GET", Path: "/api/peer", Status: 503, Timestamp: time.Now().UTC().Format(time.RFC3339Nano)})
+	stopPeerHistory()
+	sharedHistory, err := store.ListRequestHistoryEntries(ctx)
+	if err != nil {
+		t.Fatalf("list request history across replicas: %v", err)
+	}
+	if len(sharedHistory) != 3 || sharedHistory[0].ID != "peer-only" {
+		t.Fatalf("unexpected shared request history ordering: %+v", sharedHistory)
+	}
 	app, err := store.CreateApplication(ctx, "integration-"+time.Now().Format("150405.000000000"), "test application")
 	if err != nil {
 		t.Fatalf("create application: %v", err)
@@ -157,7 +171,7 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	adminEmail := "integration-" + time.Now().Format("150405.000000000") + "@example.test"
 	adminPassword := "integration-admin-password"
 	managementAuth := NewManagementAuth(store, testAPIKey, false, policyLimiter)
-	handler := newGatewayHandlerWithOptions(testAPIKey, pool, policyLimiter, WithManagementStore(store), WithManagementAuth(managementAuth))
+	handler := newGatewayHandlerWithOptions(testAPIKey, pool, policyLimiter, WithManagementStore(store), WithManagementAuth(managementAuth), WithRequestLogger(history))
 	setupRequest := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(fmt.Sprintf(`{"email":%q,"password":%q}`, adminEmail, adminPassword)))
 	setupRequest.Header.Set("X-API-Key", testAPIKey)
 	setupResponse := httptest.NewRecorder()
@@ -218,6 +232,16 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	handler.ServeHTTP(privateMetrics, privateMetricsRequest)
 	if privateMetrics.Code != http.StatusOK || !strings.Contains(privateMetrics.Body.String(), "gateway_circuit_breaker_state") {
 		t.Fatalf("authenticated dashboard metrics status=%d: %s", privateMetrics.Code, privateMetrics.Body.String())
+	}
+	sharedRequests := httptest.NewRecorder()
+	sharedRequestsRequest := httptest.NewRequest(http.MethodGet, "/api/requests?search=peer-only", nil)
+	sharedRequestsRequest.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: adminSession})
+	handler.ServeHTTP(sharedRequests, sharedRequestsRequest)
+	var sharedRequestsBody struct {
+		Requests []RequestLogEntry `json:"requests"`
+	}
+	if sharedRequests.Code != http.StatusOK || json.Unmarshal(sharedRequests.Body.Bytes(), &sharedRequestsBody) != nil || len(sharedRequestsBody.Requests) != 1 || sharedRequestsBody.Requests[0].ID != "peer-only" {
+		t.Fatalf("authenticated cross-replica request history status=%d: %s", sharedRequests.Code, sharedRequests.Body.String())
 	}
 	withAdminSession := func(req *http.Request) {
 		req.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: adminSession})

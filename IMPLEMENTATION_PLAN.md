@@ -41,6 +41,7 @@ and Docker stack. The student endpoint is sample data, not a persistent student 
 - Emit JSON logs from both `slog` and the standard logger, and allow the Caddy ingress host ports to be overridden for isolated local acceptance deployments.
 - Provision a Grafana Prometheus datasource and an operations dashboard backed by the gateway's actual request, latency, rate-limit, health, and breaker metrics.
 - Record request totals by gateway-selected backend, status code, and method with a bounded backend identity label, and visualize backend distribution in Grafana.
+- Merge bounded request-history snapshots from all gateway instances into the protected Inspector API, de-duplicating the serving replica's live ring against its last checkpoint.
 
 ## Repeatable validation
 
@@ -69,6 +70,7 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - Burst allowance checks pass against Redis; fresh PostgreSQL integration verifies API-key policy update and route policy persistence/replica propagation with burst values. Dashboard build, lint, and all 14 frontend tests pass.
 - Retry transport tests pass for transient failures, unsafe-method suppression, and non-retry of upstream HTTP error responses.
 - PostgreSQL integration verifies unhealthy, recovering, and healthy transition history, and the dashboard health-history API service passes its frontend test.
+- A fresh PostgreSQL integration test verifies that Inspector history merges and orders snapshots from independent gateway instances and that the protected request API can search a peer-only record.
 - A fresh isolated Compose deployment passes the expanded Caddy ingress acceptance, including key and route burst limits, protected health-history retrieval, and a live backend stop/recovery while healthy-peer traffic continues. Isolated resources are removed after the run.
 - JSON logging regression coverage passes for both `slog` fields and legacy standard-library log messages.
 - Grafana provisions the operations dashboard and reports seven panels through the isolated Caddy ingress; Prometheus returns real per-backend series, gateway container logs parse as JSON, and Compose accepts the dashboard/provisioning mounts.
@@ -85,5 +87,5 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 ## Operational limits
 
 - Prometheus alert rules are loaded, but notification delivery needs an operator-configured Alertmanager and receiver.
-- Inspector history is bounded and checkpointed per gateway instance; queries read the current replica's records, not a cross-replica aggregate. A crash can lose records since the last successful checkpoint.
+- Inspector history is bounded per gateway instance and aggregated from PostgreSQL snapshots; remote records can be up to two seconds stale. A crash can lose records since the last successful checkpoint.
 - No public deployment or paid hosting resources were created. Run the documented checks and acceptance against the intended hosting provider before presenting its production behavior as verified.

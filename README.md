@@ -380,11 +380,13 @@ go vet ./...
 
 Inspector history is bounded by `MAX_LOG_ENTRIES` (default 500). With PostgreSQL
 enabled, each gateway checkpoints its ring every two seconds and on graceful
-shutdown, then restores it at startup. An abrupt crash can lose records since
-the last successful checkpoint; this is diagnostic history, not an audit ledger.
-Set a stable, unique `GATEWAY_INSTANCE_ID` for each replica. History queries return
-the current replica's records. Remove snapshots for retired instance IDs as part
-of decommissioning. Database checkpoint failures are logged while traffic continues.
+shutdown, then restores it at startup. Protected history queries merge snapshots
+from all gateway instances with the serving instance's live ring and de-duplicate
+records by request ID. Remote replica records can be up to two seconds stale. An
+abrupt crash can lose records since the last successful checkpoint; this is
+diagnostic history, not an audit ledger. Set a stable, unique
+`GATEWAY_INSTANCE_ID` for each replica. Remove snapshots for retired instance IDs
+as part of decommissioning. Database checkpoint failures are logged while traffic continues.
 
 Load-test instructions and alert-delivery limitations are in
 [scripts/LOAD_TESTING.md](scripts/LOAD_TESTING.md).
