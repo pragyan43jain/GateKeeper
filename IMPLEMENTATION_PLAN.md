@@ -48,7 +48,8 @@ and Docker stack. The student endpoint is sample data, not a persistent student 
 2. `docker compose up -d --build --wait` after configuring `.env` from `.env.example`.
 3. `GATEKEEPER_API_KEY=... ALLOW_LOCAL_TLS=1 make smoke` for local Caddy certificates.
    For a public domain, set `GATEKEEPER_URL=https://your-domain` and omit `ALLOW_LOCAL_TLS`.
-4. Check dashboard tabs and use the playground to observe backend identity and 429 responses.
+4. On a disposable stack, run `GATEKEEPER_URL=https://localhost:18443 GATEKEEPER_INSECURE_TLS=1 DASHBOARD_ADMIN_EMAIL=... DASHBOARD_ADMIN_PASSWORD=... python3 scripts/acceptance.py` to verify the dashboard session, key lifecycle, backend distribution, key and route quotas, Inspector, health history, protected metrics, and logout through Caddy. The TLS override is only for Caddy's local development certificate.
+5. Check dashboard tabs and use the playground to observe backend identity and 429 responses.
 
 ## Deployment requirements
 
@@ -70,13 +71,19 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - PostgreSQL integration verifies unhealthy, recovering, and healthy transition history, and the dashboard health-history API service passes its frontend test.
 - A fresh isolated Compose deployment passes the expanded Caddy ingress acceptance, including key and route burst limits, protected health-history retrieval, and a live backend stop/recovery while healthy-peer traffic continues. Isolated resources are removed after the run.
 - JSON logging regression coverage passes for both `slog` fields and legacy standard-library log messages.
-- Grafana provisions the operations dashboard and reports seven panels through the isolated Caddy ingress; gateway container logs parse as JSON. Compose accepts all dashboard/provisioning mounts.
+- Grafana provisions the operations dashboard and reports seven panels through the isolated Caddy ingress; Prometheus returns real per-backend series, gateway container logs parse as JSON, and Compose accepts the dashboard/provisioning mounts.
+- Clean PostgreSQL-backed `make check` passes after all committed changes, including Go race tests, migrations and management integration, `go vet`, frontend build/lint, and all 14 frontend tests. The frontend bundle-size notice is non-blocking.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 
 ## Latest acceptance and remaining work
 
 - Inspector history now checkpoints to PostgreSQL every two seconds and restores its bounded ring on startup; restart retention and ordering pass PostgreSQL integration tests.
 - OpenTelemetry OTLP export and parent-context propagation pass a collector integration test. Four Prometheus alert rules pass promtool validation. External alert delivery still requires an operator-configured receiver.
-- The isolated Compose acceptance and k6 runs pass; measurements and limits are recorded in scripts/LOAD_TESTING.md.
-- Verified key lifecycle, two-backend distribution, throttling, Inspector correlation, protected metrics, logout, and active backend failure/recovery through the isolated Compose ingress.
-- Remaining product gaps include a complete final acceptance review. The full original product vision is not yet complete.
+- The isolated Compose acceptance and k6 runs pass; measurements and limits are recorded in scripts/LOAD_TESTING.md. The k6 run is dominated by explicit throttling and is not a capacity benchmark.
+- Verified key lifecycle, two-backend distribution, key and route throttling, Inspector correlation, protected metrics, logout, and active backend failure/recovery through isolated Compose ingress; Grafana dashboard provisioning and real backend series are verified too.
+
+## Operational limits
+
+- Prometheus alert rules are loaded, but notification delivery needs an operator-configured Alertmanager and receiver.
+- Inspector history is bounded and checkpointed per gateway instance; queries read the current replica's records, not a cross-replica aggregate. A crash can lose records since the last successful checkpoint.
+- No public deployment or paid hosting resources were created. Run the documented checks and acceptance against the intended hosting provider before presenting its production behavior as verified.
