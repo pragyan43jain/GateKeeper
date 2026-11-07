@@ -40,6 +40,7 @@ and Docker stack. The student endpoint is sample data, not a persistent student 
 - Persist backend health state transitions and failure reasons with a 100-event per-backend retention bound; expose them through a protected API and the Upstream Nodes console.
 - Emit JSON logs from both `slog` and the standard logger, and allow the Caddy ingress host ports to be overridden for isolated local acceptance deployments.
 - Provision a Grafana Prometheus datasource and an operations dashboard backed by the gateway's actual request, latency, rate-limit, health, and breaker metrics.
+- Give the GateKeeper Grafana datasource its own stable name and UID so persistent instances with an older Prometheus datasource can upgrade without deleting or renaming it.
 - Record request totals by gateway-selected backend, status code, and method with a bounded backend identity label, and visualize backend distribution in Grafana.
 - Merge bounded request-history snapshots from all gateway instances into the protected Inspector API, de-duplicating the serving replica's live ring against its last checkpoint.
 
@@ -74,6 +75,7 @@ Redis failure intentionally returns 503. `/health` is process liveness, not depe
 - A fresh isolated Compose deployment passes the expanded Caddy ingress acceptance, including key and route burst limits, protected health-history retrieval, and a live backend stop/recovery while healthy-peer traffic continues. Isolated resources are removed after the run.
 - JSON logging regression coverage passes for both `slog` fields and legacy standard-library log messages.
 - Grafana provisions the operations dashboard and reports seven panels through the isolated Caddy ingress; Prometheus returns real per-backend series, gateway container logs parse as JSON, and Compose accepts the dashboard/provisioning mounts.
+- A read-only clone of the existing Grafana database reproduced the old-UID provisioning failure. With the separate GateKeeper datasource UID, Grafana started successfully, returned a healthy API response, preserved the existing Prometheus datasource, and provisioned the seven-panel dashboard against the new source.
 - Clean PostgreSQL-backed `make check` passes after all committed changes, including Go race tests, migrations and management integration, `go vet`, frontend build/lint, and all 14 frontend tests. The frontend bundle-size notice is non-blocking.
 - `docker compose config --quiet`, gateway Docker image build, and Caddy validation through the existing Caddy container pass. The application stack was not restarted; only the disposable test database container was started and removed.
 

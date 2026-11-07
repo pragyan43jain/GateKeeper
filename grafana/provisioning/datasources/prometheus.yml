@@ -1,11 +1,11 @@
 apiVersion: 1
 
 datasources:
-  - name: Prometheus
-    uid: prometheus
+  - name: GateKeeper Prometheus
+    uid: gatekeeperprometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
-    isDefault: true
+    isDefault: false
     editable: true
 
