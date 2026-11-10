@@ -310,3 +310,22 @@ test('route management service persists routing and authentication controls', as
     assert.equal(JSON.parse(calls[2].init.body).burst, 3)
   } finally { globalThis.fetch = original }
 })
+
+test('management expiry notifies shell, while forbidden access preserves the session', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const events = []
+  globalThis.window = { dispatchEvent: event => events.push(event.type) }
+  try {
+    globalThis.fetch = async () => new Response('', { status: 401 })
+    await assert.rejects(fetchApplications('__session__'), /session has expired/)
+    assert.deepEqual(events, ['gatekeeper:session-expired'])
+    globalThis.fetch = async () => new Response('', { status: 403 })
+    await assert.rejects(fetchApplications('__session__'), /role does not allow/)
+    assert.equal(events.length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (originalWindow === undefined) delete globalThis.window
+    else globalThis.window = originalWindow
+  }
+})

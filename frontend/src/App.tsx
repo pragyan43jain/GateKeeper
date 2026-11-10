@@ -20,6 +20,7 @@ import {
   fetchBackendDiagnostics,
   fetchDashboardPrincipal,
   logoutDashboard,
+  SESSION_EXPIRED_EVENT,
 } from './services/api'
 import type { DashboardPrincipal } from './services/api'
 import type {
@@ -36,6 +37,9 @@ export function App() {
   const [principal, setPrincipal] = useState<DashboardPrincipal | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [sessionError, setSessionError] = useState('')
+  const [authNotice, setAuthNotice] = useState('')
+  const [loggingOut, setLoggingOut] = useState(false)
+  const sessionGeneration = useRef(0)
   const managementKey = principal ? '__session__' : ''
 
   // Telemetry state
@@ -71,7 +75,8 @@ export function App() {
 
   const refreshInFlight = useRef(false)
   const loadData = useCallback(async () => {
-    if (refreshInFlight.current) return
+    if (!managementKey || refreshInFlight.current) return
+    const generation = sessionGeneration.current
     refreshInFlight.current = true
     setIsRefreshing(true)
     try {
@@ -84,6 +89,7 @@ export function App() {
         fetchPrometheusTimeSeries(15).catch(() => null),
       ])
 
+      if (generation !== sessionGeneration.current) return
       setHealth(h)
       if (m) {
         if (managementKey) {
@@ -113,6 +119,7 @@ export function App() {
             // Ignore diagnostic fetch error; basic status from Prometheus remains
           }
         }
+        if (generation !== sessionGeneration.current) return
         setMetrics(m)
         setLastScraped(m.scrapedAt)
 
@@ -175,6 +182,9 @@ export function App() {
           rollingBuffer.current = [...rollingBuffer.current.slice(-20), newPoint]
           setTimeSeries([...rollingBuffer.current])
         }
+      } else {
+        setMetrics(null)
+        setTimeSeries(null)
       }
     } finally {
       refreshInFlight.current = false
@@ -190,12 +200,12 @@ export function App() {
 
   // Auto-refresh interval (5s)
   useEffect(() => {
-    if (!autoRefresh) return
+    if (!autoRefresh || !principal) return
     const interval = setInterval(() => {
       loadData()
     }, 5000)
     return () => clearInterval(interval)
-  }, [autoRefresh, loadData])
+  }, [autoRefresh, loadData, principal])
 
   // Handle new response received from API Playground
   const handlePlaygroundResponse = (res: PlaygroundResponseData) => {
@@ -205,8 +215,29 @@ export function App() {
     loadData()
   }
 
+  const clearSession = useCallback((notice: string) => {
+    sessionGeneration.current += 1
+    setPrincipal(null); setApiKey(''); setMetrics(null); setHealth(null)
+    setTimeSeries(null); setLastScraped(''); setLastPlaygroundResponse(null)
+    setResponseHistory([]); setSessionError(''); setCurrentTab('overview')
+    rollingBuffer.current = []; lastScrapeSnapshot.current = null
+    setAuthNotice(notice)
+  }, [])
+  useEffect(() => {
+    const expire = () => clearSession('Your session has expired. Please sign in again.')
+    window.addEventListener(SESSION_EXPIRED_EVENT, expire)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expire)
+  }, [clearSession])
+  async function handleLogout() {
+    if (loggingOut) return
+    setLoggingOut(true)
+    try { await logoutDashboard(); clearSession('You have been signed out securely.') }
+    catch { setSessionError('Sign out failed. Your session is still active; please try again.') }
+    finally { setLoggingOut(false) }
+  }
+
   if (!authChecked) return <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-sm text-zinc-400">Checking dashboard session…</div>
-  if (!principal) return <AuthScreen onAuthenticated={setPrincipal} />
+  if (!principal) return <AuthScreen notice={authNotice} onAuthenticated={user => { setAuthNotice(''); setPrincipal(user) }} />
 
   return (
     <div className="console-app flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 antialiased font-sans">
@@ -216,18 +247,16 @@ export function App() {
         onSelectTab={setCurrentTab}
         health={health}
         principal={principal}
-        onLogout={() => {
-          void logoutDashboard().then(() => {
-            setPrincipal(null)
-            setApiKey('')
-            setSessionError('')
-          }).catch(() => setSessionError('Sign out failed. Your session is still active; please try again.'))
-        }}
+        onLogout={() => void handleLogout()}
       />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0">
         <Header
+          principal={principal}
+          onSettings={() => setCurrentTab('settings')}
+          onLogout={() => void handleLogout()}
+          loggingOut={loggingOut}
           currentTab={currentTab}
           health={health}
           lastScraped={lastScraped}
@@ -239,6 +268,7 @@ export function App() {
 
         <main key={currentTab} className="flex-1 overflow-y-auto p-6 min-w-0">
           <div className="content-container max-w-7xl mx-auto space-y-6">
+            {!metrics && <p role="status" className="telemetry-notice">{isRefreshing ? 'Loading gateway telemetry…' : 'Telemetry unavailable. Refresh to reconnect; no estimated metrics are displayed.'}</p>}
             {sessionError && <p role="alert" className="text-sm text-rose-400">{sessionError}</p>}
             {currentTab === 'overview' && (
               <OverviewSection

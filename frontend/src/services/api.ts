@@ -85,6 +85,17 @@ export function parsePrometheusText(text: string): MetricSample[] {
 const rawApiUrl = (import.meta as unknown as { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL
 export const API_BASE = typeof rawApiUrl === 'string' ? rawApiUrl.trim().replace(/\/+$/, '') : ''
 
+// Management-only requests notify the shell on expiry; consumer 401s in the
+// playground must never sign the dashboard user out.
+export const SESSION_EXPIRED_EVENT = 'gatekeeper:session-expired'
+async function sessionFetch(input: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, init)
+  if (response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  }
+  return response
+}
+
 /**
  * Checks the gateway public /health endpoint.
  */
@@ -144,7 +155,7 @@ function numToCircuitState(num: number): CircuitBreakerState {
  * Fetches and aggregates Gatekeeper metrics from the authenticated dashboard endpoint.
  */
 export async function fetchGatewayMetrics(): Promise<GatewayMetricsSummary> {
-  const response = await fetch(`${API_BASE}/api/metrics`, {
+  const response = await sessionFetch(`${API_BASE}/api/metrics`, {
     signal: AbortSignal.timeout(8000),
     method: 'GET',
     credentials: 'include',
@@ -493,7 +504,7 @@ export async function fetchRequestLogs(
   if (options?.search) params.set('search', options.search)
 
   const queryStr = params.toString() ? `?${params.toString()}` : ''
-  const response = await fetch(`${API_BASE}/api/requests${queryStr}`, {
+  const response = await sessionFetch(`${API_BASE}/api/requests${queryStr}`, {
     method: 'GET',
     credentials: 'include',
     headers: {
@@ -506,7 +517,7 @@ export async function fetchRequestLogs(
 
   if (!response.ok) {
     if (response.status === 401) {
-      throw new Error('Authentication required: Invalid or missing API key')
+      throw new Error('Your session has expired. Please sign in again.')
     }
     throw new Error(`Failed to fetch request logs: HTTP ${response.status}`)
   }
@@ -519,7 +530,7 @@ export async function fetchRequestLogs(
  * Fetches real-time backend health diagnostics from /api/backends.
  */
 export async function fetchBackendDiagnostics(apiKey: string): Promise<BackendDiagnostic[]> {
-  const response = await fetch(`${API_BASE}/api/backends`, {
+  const response = await sessionFetch(`${API_BASE}/api/backends`, {
     method: 'GET',
     credentials: 'include',
     headers: {
@@ -532,7 +543,7 @@ export async function fetchBackendDiagnostics(apiKey: string): Promise<BackendDi
 
   if (!response.ok) {
     if (response.status === 401) {
-      throw new Error('Authentication required: Invalid or missing API key')
+      throw new Error('Your session has expired. Please sign in again.')
     }
     throw new Error(`Failed to fetch backend diagnostics: HTTP ${response.status}`)
   }
@@ -542,7 +553,7 @@ export async function fetchBackendDiagnostics(apiKey: string): Promise<BackendDi
 }
 
 async function managementRequest<T>(apiKey: string, path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await sessionFetch(`${API_BASE}${path}`, {
     ...init,
     credentials: 'include',
     headers: {
@@ -556,8 +567,8 @@ async function managementRequest<T>(apiKey: string, path: string, init: RequestI
   })
   if (!response.ok) {
     const message = response.status === 401
-      ? 'Administrator API key required or invalid'
-      : `Management request failed: HTTP ${response.status}`
+      ? 'Your session has expired. Please sign in again.'
+      : response.status === 403 ? 'Your role does not allow this action.' : `Management request failed: HTTP ${response.status}`
     throw new Error(message)
   }
   if (response.status === 204) return undefined as T

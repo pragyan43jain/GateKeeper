@@ -20,14 +20,15 @@ export function SettingsSection({ apiKey, principal }: SettingsSectionProps) {
     finally { setBusy(false) }
   }, [apiKey])
   useEffect(() => {
+    if (principal.role !== 'admin') return
     let active = true
     fetchDashboardUsers(apiKey).then((result) => { if (active) setUsers(result) }).catch((err: unknown) => {
       if (active) setError(err instanceof Error ? err.message : 'Could not load dashboard users')
     })
     return () => { active = false }
-  }, [apiKey])
+  }, [apiKey, principal.role])
 
-  if (principal.role !== 'admin') return <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">Only an administrator can manage dashboard accounts.</section>
+
 
   async function createUser(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(''); setMessage('')
@@ -52,7 +53,13 @@ export function SettingsSection({ apiKey, principal }: SettingsSectionProps) {
     catch (err) { setError(err instanceof Error ? err.message : 'Could not remove account') }
   }
 
-  return <div className="space-y-6">
+  const profile = <section className="account-summary rounded-xl border border-zinc-800 bg-zinc-900 p-6">
+    <p className="eyebrow">YOUR ACCOUNT</p><h2 className="mt-3 text-xl font-semibold">Profile & security</h2>
+    <dl className="mt-5 grid gap-5 sm:grid-cols-2"><div><dt>Email</dt><dd>{principal.email}</dd></div><div><dt>Access role</dt><dd>{principal.role}</dd></div><div><dt>Session protection</dt><dd>Server-managed HttpOnly cookie</dd></div><div><dt>Appearance</dt><dd>Dark console</dd></div></dl>
+    <p className="mt-5 text-xs text-zinc-400">Use the account menu to sign out and invalidate this session. Password recovery is not available.</p>
+  </section>
+  if (principal.role !== 'admin') return <div className="space-y-6">{profile}<p className="text-sm text-zinc-400">Account administration is available to administrators.</p></div>
+  return <div className="space-y-6">{profile}
     <section className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
       <div className="mb-4 flex items-center justify-between"><div><h2 className="flex items-center gap-2 font-semibold"><Shield size={17} className="text-sky-400" />Dashboard accounts</h2><p className="mt-1 text-xs text-zinc-500">Role changes apply to the next management request.</p></div><button onClick={() => void refresh()} disabled={busy} className="rounded-lg border border-zinc-700 p-2 text-zinc-300"><RefreshCw size={15} className={busy ? 'animate-spin' : ''} /></button></div>
       {error && <p role="alert" className="mb-3 text-sm text-rose-400">{error}</p>}{message && <p role="status" className="mb-3 text-sm text-emerald-400">{message}</p>}

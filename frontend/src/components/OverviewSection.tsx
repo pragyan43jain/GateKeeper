@@ -9,7 +9,7 @@ import {
   ArrowUpRight,
 } from 'lucide-react'
 import TechStackBento from '@/components/ui/interactive-tech-stack-bento-grid-with-hover-effects'
-import { WebShotButton } from '@/components/ui/web-shot-button'
+import { Button } from './ui/button'
 import type {
   GatewayHealth,
   GatewayMetricsSummary,
@@ -59,7 +59,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
         <div className="hero-copy"><div className="eyebrow"><span/> YOUR INFRASTRUCTURE, IN FOCUS</div>
           <h2>Every request.<br/><em>Under control.</em></h2>
           <p>A clear view of your gateway. Follow the traffic, watch your upstreams, and keep your APIs moving.</p>
-          <div className="hero-actions"><WebShotButton color="#d92344" size="md" onClick={() => onNavigate('playground')}>Launch playground <ArrowUpRight size={17}/></WebShotButton><button className="hero-secondary" onClick={() => onNavigate('metrics')}>Explore metrics</button></div>
+          <div className="hero-actions"><Button onClick={() => onNavigate('playground')}>Launch playground <ArrowUpRight size={17}/></Button><button className="hero-secondary" onClick={() => onNavigate('metrics')}>Explore metrics</button></div>
         </div>
         <div className="network-map" aria-label="Gateway routing topology">
           <div className="orbit orbit-one"/><div className="orbit orbit-two"/>
@@ -106,7 +106,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
           </div>
           <div className="mt-3">
             <div className="text-2xl font-bold text-zinc-100 font-mono">
-              {totalRequests.toLocaleString()}
+              {metrics ? totalRequests.toLocaleString() : '—'}
             </div>
             <div className="text-xs text-zinc-400 mt-1">
               Success rate: <span className="text-emerald-400 font-medium font-mono">{successRate}%</span>
@@ -146,7 +146,7 @@ export const OverviewSection: React.FC<OverviewSectionProps> = ({
           </div>
           <div className="mt-3">
             <div className="text-2xl font-bold text-zinc-100 font-mono">
-              {(metrics?.rateLimitRejections ?? 0).toLocaleString()}
+              {metrics?.rateLimitRejections.toLocaleString() ?? '—'}
             </div>
             <div className="text-xs text-zinc-400 mt-1">
               Redis sliding-window 429s

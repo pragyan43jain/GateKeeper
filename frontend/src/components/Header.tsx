@@ -1,8 +1,14 @@
 import React from 'react'
+import { ProfileDropdown } from './ProfileDropdown'
+import type { DashboardPrincipal } from '../services/api'
 import { RefreshCw, CheckCircle2, AlertCircle, Clock } from 'lucide-react'
 import type { TabType, GatewayHealth } from '../types'
 
 interface HeaderProps {
+  principal: DashboardPrincipal
+  onSettings: () => void
+  onLogout: () => void
+  loggingOut: boolean
   currentTab: TabType
   health: GatewayHealth | null
   lastScraped: string
@@ -22,7 +28,7 @@ const tabMeta: Record<TabType, { title: string; subtitle: string }> = {
     subtitle: 'Per-backend node health, round-robin load distribution, and failure isolation states.',
   },
   ratelimit: {
-    title: 'Redis Rate Limiting',
+    title: 'Traffic policies',
     subtitle: 'Sliding-window policy inspection, active quota consumption, and 429 rejection tracking.',
   },
   metrics: {
@@ -56,6 +62,7 @@ const tabMeta: Record<TabType, { title: string; subtitle: string }> = {
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  principal, onSettings, onLogout, loggingOut,
   currentTab,
   health,
   lastScraped,
@@ -79,6 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="flex items-center gap-3">
+        <ProfileDropdown principal={principal} onSettings={onSettings} onLogout={onLogout} busy={loggingOut} />
         {/* Gateway Health Indicator */}
         <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-950 border border-zinc-800 text-xs font-mono">
           {isHealthy ? (
@@ -120,7 +128,7 @@ export const Header: React.FC<HeaderProps> = ({
           onClick={onManualRefresh}
           disabled={isRefreshing}
           className="p-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700/80 transition-colors disabled:opacity-50"
-          title="Refresh telemetry"
+          title="Refresh telemetry" aria-label="Refresh telemetry"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-indigo-400' : ''}`} />
         </button>
