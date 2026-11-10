@@ -632,7 +632,7 @@ async function authenticateDashboard(path: string, credentials: { email: string;
     headers: { 'Content-Type': 'application/json', ...(bootstrapKey ? { 'X-API-Key': bootstrapKey } : {}) },
     body: JSON.stringify(credentials), cache: 'no-store',
   })
-  if (!response.ok) throw new Error(response.status === 401 ? 'Invalid credentials or bootstrap key' : `Dashboard authentication failed: HTTP ${response.status}`)
+  if (!response.ok) throw new Error(response.status === 401 ? 'Invalid email or password.' : response.status === 409 && path === '/api/auth/register' ? 'An account with this email already exists. Sign in instead.' : `Dashboard authentication failed: HTTP ${response.status}`)
   return (await response.json()) as DashboardPrincipal
 }
 
