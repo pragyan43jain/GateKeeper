@@ -2,6 +2,8 @@
 
 GateKeeper is an API Gateway and Traffic Management Platform written in Go. It provides API-key authentication, Redis-backed sliding-window rate limiting, selectable health-aware load balancing with independent per-backend circuit breakers, active backend health checks, bounded request inspection, Prometheus metrics, dashboard sessions and account roles, and automated TLS termination via Caddy. PostgreSQL stores management configuration and dashboard identities; Redis stores transient rate-limit state.
 
+**Live dashboard:** [https://gk-console.vercel.app](https://gk-console.vercel.app) · Hosted on Vercel and connected to the GateKeeper gateway on Railway.
+
 ---
 
 ## Architecture Overview
