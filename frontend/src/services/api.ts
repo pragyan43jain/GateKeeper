@@ -611,6 +611,10 @@ export async function setupDashboard(bootstrapKey: string, email: string, passwo
   return authenticateDashboard('/api/auth/setup', { email, password }, bootstrapKey)
 }
 
+export async function registerDashboard(email: string, password: string): Promise<DashboardPrincipal> {
+  return authenticateDashboard('/api/auth/register', { email, password })
+}
+
 async function authenticateDashboard(path: string, credentials: { email: string; password: string }, bootstrapKey?: string): Promise<DashboardPrincipal> {
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'POST', credentials: 'include',

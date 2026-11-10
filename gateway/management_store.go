@@ -24,6 +24,7 @@ var ErrAPIKeyNotFound = errors.New("API key not found or inactive")
 var ErrBackendNotFound = errors.New("backend not found")
 var ErrRouteNotFound = errors.New("route not found")
 var ErrDashboardSetupComplete = errors.New("dashboard administrator is already configured")
+var ErrDashboardSetupRequired = errors.New("create the first dashboard administrator before account registration")
 
 type ManagementStore struct {
 	db *sql.DB
@@ -162,6 +163,37 @@ func (s *ManagementStore) BootstrapDashboardAdmin(ctx context.Context, email, pa
 	var user DashboardUser
 	err = tx.QueryRowContext(ctx, `INSERT INTO users(email, password_hash, role) VALUES ($1, $2, 'admin')
 		RETURNING id::text, email, role, created_at`, email, passwordHash).
+		Scan(&user.ID, &user.Email, &user.Role, &user.CreatedAt)
+	if err != nil {
+		return DashboardUser{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DashboardUser{}, err
+	}
+	return user, nil
+}
+
+// RegisterDashboardUser creates a self-registered account with read-only access.
+// The advisory lock keeps registration from racing the one-time administrator bootstrap.
+func (s *ManagementStore) RegisterDashboardUser(ctx context.Context, email, passwordHash string) (DashboardUser, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return DashboardUser{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(72184732011002)`); err != nil {
+		return DashboardUser{}, err
+	}
+	var admins int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users WHERE role = 'admin'`).Scan(&admins); err != nil {
+		return DashboardUser{}, err
+	}
+	if admins == 0 {
+		return DashboardUser{}, ErrDashboardSetupRequired
+	}
+	var user DashboardUser
+	err = tx.QueryRowContext(ctx, `INSERT INTO users(email, password_hash, role)
+		VALUES ($1, $2, 'viewer') RETURNING id::text, email, role, created_at`, email, passwordHash).
 		Scan(&user.ID, &user.Email, &user.Role, &user.CreatedAt)
 	if err != nil {
 		return DashboardUser{}, err

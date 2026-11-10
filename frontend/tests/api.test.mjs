@@ -25,6 +25,7 @@ import {
   createManagedRoute,
   updateManagedRoute,
   deleteManagedRoute,
+  registerDashboard,
 } from '../src/services/api.ts'
 
 test('dashboard discovers only actual upstreams', async () => {
@@ -35,6 +36,23 @@ test('dashboard discovers only actual upstreams', async () => {
     assert.deepEqual(metrics.backends.map(b => b.id), ['actual:9000'])
     assert.equal(metrics.backends[0].state, 'open')
     assert.equal(metrics.backends[0].trips, 3)
+  } finally { globalThis.fetch = original }
+})
+
+test('dashboard self-registration creates a session without sending a consumer API key', async () => {
+  const original = globalThis.fetch
+  let request
+  globalThis.fetch = async (url, init) => {
+    request = { url: String(url), init }
+    return Response.json({ id: 'viewer-1', email: 'viewer@example.test', role: 'viewer' }, { status: 200 })
+  }
+  try {
+    const principal = await registerDashboard('viewer@example.test', 'correct-horse-battery')
+    assert.equal(principal.role, 'viewer')
+    assert.ok(request.url.endsWith('/api/auth/register'))
+    assert.equal(request.init.credentials, 'include')
+    assert.equal(request.init.headers['X-API-Key'], undefined)
+    assert.deepEqual(JSON.parse(request.init.body), { email: 'viewer@example.test', password: 'correct-horse-battery' })
   } finally { globalThis.fetch = original }
 })
 

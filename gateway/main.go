@@ -2270,6 +2270,10 @@ func newGatewayHandlerWithOptions(apiKey string, proxy http.Handler, limiter Rat
 
 	// Dedicated metrics endpoint using Prometheus format. Unauthenticated and sensitive-data free.
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if getEnvBool("DISABLE_METRICS_ENDPOINT", false) {
+			http.Error(w, "Access Denied", http.StatusForbidden)
+			return
+		}
 		if pool, ok := proxy.(*BackendPool); ok {
 			pool.UpdateMetrics()
 		} else if rp, ok := proxy.(*httputil.ReverseProxy); ok {

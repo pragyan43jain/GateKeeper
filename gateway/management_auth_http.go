@@ -77,6 +77,48 @@ func registerAuthenticationRoutes(mux *http.ServeMux, auth *ManagementAuth) {
 		issueDashboardSession(w, r, auth, user)
 	})
 
+	mux.HandleFunc("/api/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		clientIP := remoteClientIdentity(r.RemoteAddr, r.Header.Get("X-Real-IP"))
+		if !auth.AllowLoginAttempt(r.Context(), clientIP) {
+			http.Error(w, "Too many account creation attempts; try again later", http.StatusTooManyRequests)
+			return
+		}
+		var input struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if err := decodeManagementJSON(w, r, &input); err != nil {
+			http.Error(w, "Invalid account request", http.StatusBadRequest)
+			return
+		}
+		email, err := normalizeDashboardCredentials(input.Email, input.Password)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		hash, err := hashDashboardPassword(input.Password)
+		if err != nil {
+			http.Error(w, "Unable to prepare account credentials", http.StatusInternalServerError)
+			return
+		}
+		user, err := auth.store.RegisterDashboardUser(r.Context(), email, hash)
+		if errors.Is(err, ErrDashboardSetupRequired) {
+			http.Error(w, "Dashboard administrator setup is required before account registration", http.StatusConflict)
+			return
+		}
+		if err != nil {
+			http.Error(w, "Account could not be created; the email may already be registered", http.StatusConflict)
+			return
+		}
+		auth.LoginSucceeded(clientIP)
+		issueDashboardSession(w, r, auth, user)
+	})
+
 	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")

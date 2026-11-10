@@ -172,6 +172,11 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	adminPassword := "integration-admin-password"
 	managementAuth := NewManagementAuth(store, testAPIKey, false, policyLimiter)
 	handler := newGatewayHandlerWithOptions(testAPIKey, pool, policyLimiter, WithManagementStore(store), WithManagementAuth(managementAuth), WithRequestLogger(history))
+	preSetupRegistration := httptest.NewRecorder()
+	handler.ServeHTTP(preSetupRegistration, httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(`{"email":"viewer@example.test","password":"viewer-password-123"}`)))
+	if preSetupRegistration.Code != http.StatusConflict {
+		t.Fatalf("registration before administrator setup status=%d, want 409", preSetupRegistration.Code)
+	}
 	setupRequest := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(fmt.Sprintf(`{"email":%q,"password":%q}`, adminEmail, adminPassword)))
 	setupRequest.Header.Set("X-API-Key", testAPIKey)
 	setupResponse := httptest.NewRecorder()
@@ -186,6 +191,20 @@ func TestManagementMigrationsApplyAndAreIdempotent(t *testing.T) {
 	}
 	adminSession := setupCookie.Value
 	adminUser := DashboardUser{ID: admin.ID, Email: admin.Email, Role: admin.Role}
+	viewerEmail := "viewer-" + time.Now().Format("150405.000000000") + "@example.test"
+	registration := httptest.NewRecorder()
+	handler.ServeHTTP(registration, httptest.NewRequest(http.MethodPost, "/api/auth/register", strings.NewReader(fmt.Sprintf(`{"email":%q,"password":%q}`, viewerEmail, "viewer-password-123"))))
+	var viewer ManagementPrincipal
+	if registration.Code != http.StatusOK || json.Unmarshal(registration.Body.Bytes(), &viewer) != nil || viewer.Role != "viewer" || len(registration.Result().Cookies()) != 1 {
+		t.Fatalf("viewer registration status=%d body=%s", registration.Code, registration.Body.String())
+	}
+	viewerUserCreate := httptest.NewRecorder()
+	viewerUserCreateRequest := httptest.NewRequest(http.MethodPost, "/api/users", strings.NewReader(`{"email":"another@example.test","password":"another-password-123","role":"admin"}`))
+	viewerUserCreateRequest.AddCookie(registration.Result().Cookies()[0])
+	handler.ServeHTTP(viewerUserCreate, viewerUserCreateRequest)
+	if viewerUserCreate.Code != http.StatusForbidden {
+		t.Fatalf("viewer user-management status=%d, want 403", viewerUserCreate.Code)
+	}
 	setupAgain := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(fmt.Sprintf(`{"email":%q,"password":%q}`, adminEmail, adminPassword)))
 	setupAgain.Header.Set("X-API-Key", testAPIKey)
 	setupAgainResponse := httptest.NewRecorder()

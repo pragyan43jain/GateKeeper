@@ -67,3 +67,14 @@ func TestSessionCookieIsHttpOnlyAndStrict(t *testing.T) {
 		t.Fatalf("unexpected session cookie flags: %+v", cookie)
 	}
 }
+
+func TestPublicDeploymentCanDisableRawMetrics(t *testing.T) {
+	t.Setenv("DISABLE_METRICS_ENDPOINT", "true")
+	handler, upstream := setupTestGateway(t, &mockLimiterAllowed{})
+	defer upstream.Close()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	if response.Code != 403 {
+		t.Fatalf("raw metrics status = %d, want 403", response.Code)
+	}
+}

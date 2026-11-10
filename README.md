@@ -77,7 +77,7 @@ flowchart TD
 - **Scoped Telemetry Ingress**: Prometheus query access through the edge proxy is strictly restricted to query endpoints (`/prometheus/api/v1/query` and `/query_range`) used by the dashboard. Public `/metrics` and administrative Prometheus endpoints are blocked with `403 Forbidden`; Prometheus scrapes the gateway internally.
 - **Restricted Cross-Origin Access**: Same-origin access is the default. Set `CORS_ALLOWED_ORIGINS` to explicit origins when hosting the dashboard separately; wildcard access is an explicit opt-in.
 - **Internal Service Isolation**: Upstream backends, Redis, Prometheus, Grafana, and the gateway do not publish ports to the public host interface. All public traffic must enter through Caddy on ports 80 and 443.
-- **Dashboard Access Control**: First-run setup uses the bootstrap `GATEKEEPER_API_KEY` once to create an administrator. Thereafter, management APIs require opaque PostgreSQL-backed session cookies; user passwords use bcrypt and stored session tokens are hashed. Admin, developer, and viewer roles restrict management access, and audit events record the named account.
+- **Dashboard Access Control**: First-run setup uses the bootstrap `GATEKEEPER_API_KEY` once to create an administrator. Thereafter, management APIs require opaque PostgreSQL-backed session cookies; user passwords use bcrypt and stored session tokens are hashed. Admin, developer, and viewer roles restrict management access, and audit events record the named account. Once the first administrator exists, visitors can create viewer-only dashboard accounts and sign in; administrators can promote accounts from Settings.
 - **PostgreSQL Management Layer**: Versioned startup migrations create dashboard accounts and sessions, applications, API keys, backends, routes, rate-limit policies, audit events, and settings. Consumer secrets are stored as SHA-256 hashes and returned once. Per-key and per-route limits and permissions are enforced by the gateway; Redis holds the sliding-window event state.
 
 ---
@@ -148,6 +148,15 @@ For the dashboard, either set `DASHBOARD_ADMIN_EMAIL` and a 12–72 byte
 the first-run setup screen with `GATEKEEPER_API_KEY`. Once an administrator exists,
 the bootstrap key no longer authenticates management APIs. Keep
 `DASHBOARD_SESSION_COOKIE_SECURE=true` when serving the dashboard over HTTPS.
+Self-service account registration is enabled after bootstrap and always assigns
+the `viewer` role. An administrator can change account roles from Settings.
+
+The Vercel deployment proxies `/api/*` and `/health` to the Railway Gateway
+through `frontend/vercel.json`. Keep `VITE_API_URL` unset for this deployment so
+session cookies stay on the dashboard origin. Railway hosts PostgreSQL, Redis,
+the Gateway, and one private service running the two sample backend processes.
+The upstreams share a container failure domain in this credit-limited demo.
+Raw `/metrics` is disabled on the public Gateway; dashboard metrics require a session.
 
 ```bash
 # Generate secrets
