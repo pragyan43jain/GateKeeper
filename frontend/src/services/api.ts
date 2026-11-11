@@ -601,7 +601,7 @@ export async function deleteDashboardUser(apiKey: string, id: string): Promise<v
 }
 
 export async function fetchDashboardPrincipal(): Promise<DashboardPrincipal | null> {
-  const response = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include', cache: 'no-store' })
+  const response = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(8000) })
   if (response.status === 401) return null
   if (!response.ok) throw new Error(`Dashboard authentication failed: HTTP ${response.status}`)
   return (await response.json()) as DashboardPrincipal
@@ -632,7 +632,7 @@ async function authenticateDashboard(path: string, credentials: { email: string;
     headers: { 'Content-Type': 'application/json', ...(bootstrapKey ? { 'X-API-Key': bootstrapKey } : {}) },
     body: JSON.stringify(credentials), cache: 'no-store',
   })
-  if (!response.ok) throw new Error(response.status === 401 ? 'Invalid email or password.' : response.status === 409 && path === '/api/auth/register' ? 'An account with this email already exists. Sign in instead.' : `Dashboard authentication failed: HTTP ${response.status}`)
+  if (!response.ok) throw new Error(response.status === 401 ? 'Invalid email or password.' : response.status === 409 && path === '/api/auth/register' ? 'Account creation could not be completed. If you already have an account, sign in; otherwise contact your administrator.' : `Dashboard authentication failed: HTTP ${response.status}`)
   return (await response.json()) as DashboardPrincipal
 }
 

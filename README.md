@@ -416,3 +416,18 @@ integration test runs when `TEST_DATABASE_URL` points to a disposable PostgreSQL
 Run `make up` to build and start the stack, then use `make smoke` with
 `GATEKEEPER_API_KEY` set. For local self-signed Caddy TLS only, set `ALLOW_LOCAL_TLS=1`.
 The backend is a read-only demonstration service; student records are sample data.
+
+## Dashboard verification and hosting limits
+
+Run `cd frontend && npm ci && npx playwright install chromium && npm run test:e2e`
+to exercise the mobile login/session/navigation/logout flow and connection recovery.
+These browser tests use deterministic API fixtures; backend authorization and persistence
+are covered separately by the Go integration suite. CI runs both.
+
+The Railway demo has no historical Prometheus service. Charts explicitly identify
+session-only observations when history is unavailable. Docker Compose supplies the
+full monitoring stack and independent backend containers for failure-isolation demos.
+The Railway backend processes share a service due to the current account limit;
+separating them requires available service capacity. No hosting upgrade is required
+for the dashboard fixes. The Vercel short domain is assigned to the frontend project
+so future production deployments can update it automatically.

@@ -1,18 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import { Sidebar } from './components/Sidebar'
 import { Header } from './components/Header'
-import { OverviewSection } from './components/OverviewSection'
-import { BackendsSection } from './components/BackendsSection'
-import { RateLimitingSection } from './components/RateLimitingSection'
-import { MetricsSection } from './components/MetricsSection'
-import { PlaygroundSection } from './components/PlaygroundSection'
-import { InspectorSection } from './components/InspectorSection'
-import { APIKeysSection } from './components/APIKeysSection'
-import { TrafficPoliciesSection } from './components/TrafficPoliciesSection'
-import { AuditLogsSection } from './components/AuditLogsSection'
-import { RoutesSection } from './components/RoutesSection'
 import { AuthScreen } from './components/AuthScreen'
-import { SettingsSection } from './components/SettingsSection'
 import {
   fetchGatewayHealth,
   fetchGatewayMetrics,
@@ -32,9 +21,22 @@ import type {
   BackendDiagnostic,
 } from './types'
 
+const OverviewSection = lazy(() => import('./components/OverviewSection').then(module => ({ default: module.OverviewSection })))
+const BackendsSection = lazy(() => import('./components/BackendsSection').then(module => ({ default: module.BackendsSection })))
+const RateLimitingSection = lazy(() => import('./components/RateLimitingSection').then(module => ({ default: module.RateLimitingSection })))
+const MetricsSection = lazy(() => import('./components/MetricsSection').then(module => ({ default: module.MetricsSection })))
+const PlaygroundSection = lazy(() => import('./components/PlaygroundSection').then(module => ({ default: module.PlaygroundSection })))
+const InspectorSection = lazy(() => import('./components/InspectorSection').then(module => ({ default: module.InspectorSection })))
+const APIKeysSection = lazy(() => import('./components/APIKeysSection').then(module => ({ default: module.APIKeysSection })))
+const TrafficPoliciesSection = lazy(() => import('./components/TrafficPoliciesSection').then(module => ({ default: module.TrafficPoliciesSection })))
+const AuditLogsSection = lazy(() => import('./components/AuditLogsSection').then(module => ({ default: module.AuditLogsSection })))
+const RoutesSection = lazy(() => import('./components/RoutesSection').then(module => ({ default: module.RoutesSection })))
+const SettingsSection = lazy(() => import('./components/SettingsSection').then(module => ({ default: module.SettingsSection })))
+
 export function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('overview')
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), [])
   const [principal, setPrincipal] = useState<DashboardPrincipal | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [sessionError, setSessionError] = useState('')
@@ -55,6 +57,11 @@ export function App() {
   // API Playground state (IN-MEMORY ONLY)
   const [apiKey, setApiKey] = useState<string>('')
 
+  const checkSession = useCallback(async () => {
+    try { setPrincipal(await fetchDashboardPrincipal()); setAuthConnectionError('') }
+    catch { setAuthConnectionError('Could not reach the gateway. Check your connection and retry.') }
+    finally { setAuthChecked(true) }
+  }, [])
   useEffect(() => {
     fetchDashboardPrincipal().then(user => { setPrincipal(user); setAuthConnectionError('') }).catch(() => {
       setAuthConnectionError('Could not reach the gateway. Check your connection and retry.')
@@ -239,6 +246,7 @@ export function App() {
   }
 
   if (!authChecked) return <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-sm text-zinc-400" role="status">Checking dashboard session…</div>
+  if (authConnectionError && !principal) return <main className="min-h-screen grid place-content-center gap-4 p-6"><p role="alert">{authConnectionError}</p><button className="console-button console-button-default" onClick={() => { setAuthChecked(false); void checkSession() }}>Retry session connection</button></main>
   if (!principal) return <AuthScreen notice={authConnectionError || authNotice} onAuthenticated={user => { setAuthNotice(''); setAuthConnectionError(''); setPrincipal(user) }} />
 
   return (
@@ -250,7 +258,7 @@ export function App() {
         health={health}
         principal={principal}
         mobileOpen={mobileNavOpen}
-        onCloseMobile={() => setMobileNavOpen(false)}
+        onCloseMobile={closeMobileNav}
       />
 
       {/* Main Content Area */}
@@ -272,8 +280,10 @@ export function App() {
         />
 
         <main key={currentTab} className="flex-1 overflow-y-auto p-6 min-w-0">
+          <Suspense fallback={<p role="status">Loading dashboard section…</p>}>
           <div className="content-container max-w-7xl mx-auto space-y-6">
-            {!metrics && <p role="status" className="telemetry-notice">{isRefreshing ? 'Loading gateway telemetry…' : 'Telemetry unavailable. Refresh to reconnect; no estimated metrics are displayed.'}</p>}
+            {!metrics && <p role="status" className="telemetry-notice">{isRefreshing ? 'Loading gateway telemetry…' : 'Telemetry unavailable. Use Refresh telemetry to reconnect. Metrics are unavailable.'}</p>}
+            {timeSeries?.some(point => point.isFallback) && <p role="status" className="telemetry-notice">Historical monitoring is unavailable. Charts show observations collected during this session; reload clears this history.</p>}
             {sessionError && <p role="alert" className="text-sm text-rose-400">{sessionError}</p>}
             {currentTab === 'overview' && (
               <OverviewSection
@@ -349,6 +359,7 @@ export function App() {
               <SettingsSection apiKey={managementKey} principal={principal} />
             )}
           </div>
+          </Suspense>
         </main>
       </div>
     </div>

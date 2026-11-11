@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { Activity, Server, Gauge, BarChart3, Terminal, Shield, ArrowUpRight, FileText, KeyRound, ClipboardList, Route, Settings } from 'lucide-react'
 import type { TabType, GatewayHealth } from '../types'
 import type { DashboardPrincipal } from '../services/api'
@@ -26,16 +26,27 @@ const items = [
 ] as const
 
 export function Sidebar({ currentTab, onSelectTab, health, principal, mobileOpen, onCloseMobile }: SidebarProps) {
+  const panel = useRef<HTMLElement>(null)
   useEffect(() => {
     if (!mobileOpen) return
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onCloseMobile() }
+    const previous = document.activeElement
+    const elements = () => Array.from(panel.current?.querySelectorAll<HTMLElement>('a[href],button:not([disabled])') || []).filter(element => element.getClientRects().length)
+    elements()[0]?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCloseMobile()
+      if (event.key === 'Tab') {
+        const nodes = elements(), first = nodes[0], last = nodes[nodes.length - 1]
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+        if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+      }
+    }
     window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown); if (previous instanceof HTMLElement) previous.focus() }
   }, [mobileOpen, onCloseMobile])
   return (
     <>
       {mobileOpen && <button className="mobile-nav-backdrop" aria-label="Close navigation" onClick={onCloseMobile} />}
-      <aside className={`console-sidebar${mobileOpen ? ' mobile-open' : ''}`} aria-label="Sidebar navigation">
+      <aside ref={panel} className={`console-sidebar${mobileOpen ? ' mobile-open' : ''}`} aria-label="Sidebar navigation">
       <a
         className="brand"
         href="#"

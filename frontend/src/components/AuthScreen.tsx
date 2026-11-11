@@ -23,6 +23,8 @@ function describeAuthError(error: unknown): string {
 export function AuthScreen({ onAuthenticated, notice }: AuthScreenProps) {
   const [setupRequired, setSetupRequired] = useState(false)
   const [mode, setMode] = useState<AuthMode>('login')
+  const [connectionFailed, setConnectionFailed] = useState(false)
+  const [retry, setRetry] = useState(0)
   const [loading, setLoading] = useState(true)
   const [showPassword, setShowPassword] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -38,9 +40,9 @@ export function AuthScreen({ onAuthenticated, notice }: AuthScreenProps) {
         setSetupRequired(required)
         if (required) setMode('register')
       })
-      .catch((err: unknown) => setError(describeAuthError(err)))
+      .catch((err: unknown) => { setConnectionFailed(true); setError(describeAuthError(err)) })
       .finally(() => setLoading(false))
-  }, [])
+  }, [retry])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -127,6 +129,7 @@ export function AuthScreen({ onAuthenticated, notice }: AuthScreenProps) {
           </div>
 
           {notice && <p role="status" className="auth-notice">{notice}</p>}
+          {connectionFailed && <Button onClick={() => { setConnectionFailed(false); setLoading(true); setError(''); setRetry(value => value + 1) }}>Retry gateway connection</Button>}
           {loading ? (
             <div className="auth-loading" role="status"><span className="auth-spinner" /> Checking gateway connection…</div>
           ) : (
@@ -147,7 +150,7 @@ export function AuthScreen({ onAuthenticated, notice }: AuthScreenProps) {
               {error && <div role="alert" className="auth-error"><span>!</span><p>{error}</p></div>}
               {creating && !setupRequired && <p className="auth-role-note"><Shield size={13} /> New accounts have viewer access. An administrator can grant more permissions.</p>}
 
-              <Button type="submit" disabled={busy} className="auth-submit">{busy ? <><span className="auth-button-spinner" /> Securing your session…</> : <>{setupRequired ? 'Create administrator' : creating ? 'Create account' : 'Sign in'} <ArrowRight size={16} /></>}</Button>
+              <Button type="submit" disabled={busy || connectionFailed} className="auth-submit">{busy ? <><span className="auth-button-spinner" /> Securing your session…</> : <>{setupRequired ? 'Create administrator' : creating ? 'Create account' : 'Sign in'} <ArrowRight size={16} /></>}</Button>
             </form>
           )}
 

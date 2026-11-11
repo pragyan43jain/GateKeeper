@@ -182,3 +182,5 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
   .console-header { gap:8px; }.header-title { flex:1; }.console-header>div:first-child { flex:1; }.console-header>div:last-child { gap:6px; }
 }
 @media(min-width:761px) { .mobile-nav-backdrop { display:none; } }
+
+@media(max-width:760px) { .console-sidebar:not(.mobile-open) { visibility:hidden; } .console-sidebar.mobile-open { visibility:visible; } }
