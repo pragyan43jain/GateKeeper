@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Activity, Server, Gauge, BarChart3, Terminal, Shield, ArrowUpRight, FileText, KeyRound, ClipboardList, Route, Settings } from 'lucide-react'
 import type { TabType, GatewayHealth } from '../types'
 import type { DashboardPrincipal } from '../services/api'
@@ -7,7 +8,8 @@ interface SidebarProps {
   onSelectTab: (tab: TabType) => void
   health: GatewayHealth | null
   principal: DashboardPrincipal
-  onLogout: () => void
+  mobileOpen: boolean
+  onCloseMobile: () => void
 }
 
 const items = [
@@ -23,15 +25,23 @@ const items = [
   { id: 'settings', label: 'Settings & users', icon: Settings },
 ] as const
 
-export function Sidebar({ currentTab, onSelectTab, health, principal, onLogout }: SidebarProps) {
+export function Sidebar({ currentTab, onSelectTab, health, principal, mobileOpen, onCloseMobile }: SidebarProps) {
+  useEffect(() => {
+    if (!mobileOpen) return
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onCloseMobile() }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [mobileOpen, onCloseMobile])
   return (
-    <aside className="console-sidebar">
+    <>
+      {mobileOpen && <button className="mobile-nav-backdrop" aria-label="Close navigation" onClick={onCloseMobile} />}
+      <aside className={`console-sidebar${mobileOpen ? ' mobile-open' : ''}`} aria-label="Sidebar navigation">
       <a
         className="brand"
         href="#"
         onClick={(e) => {
           e.preventDefault()
-          onSelectTab('overview')
+          onSelectTab('overview'); onCloseMobile()
         }}
       >
         <span className="brand-mark">
@@ -54,7 +64,7 @@ export function Sidebar({ currentTab, onSelectTab, health, principal, onLogout }
         {items.map(({ id, label, icon: Icon }, index) => (
           <button
             key={id}
-            onClick={() => onSelectTab(id)}
+            onClick={() => { onSelectTab(id); onCloseMobile() }}
             className={`nav-item ${currentTab === id ? 'active' : ''}`}
             aria-current={currentTab === id ? 'page' : undefined}
             title={label}
@@ -69,13 +79,12 @@ export function Sidebar({ currentTab, onSelectTab, health, principal, onLogout }
         <div className="mb-3 flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/70 p-3">
           <span className="grid h-8 w-8 place-items-center rounded-full bg-sky-500/15 text-xs font-semibold text-sky-300">{principal.email.slice(0, 1).toUpperCase()}</span>
           <span className="min-w-0 flex-1"><strong className="block truncate text-xs">{principal.email}</strong><small className="text-zinc-500">{principal.role}</small></span>
-          <button onClick={onLogout} className="text-xs text-zinc-400 hover:text-white" title="Sign out">Sign out</button>
         </div>
         <div className="sidebar-note">
           <Shield size={20} />
           <h3>Built for the unexpected.</h3>
           <p>One place to observe, protect, and route every request.</p>
-          <button onClick={() => onSelectTab('playground')}>
+          <button onClick={() => { onSelectTab('playground'); onCloseMobile() }}>
             Explore your gateway <ArrowUpRight size={15} />
           </button>
         </div>
@@ -86,5 +95,6 @@ export function Sidebar({ currentTab, onSelectTab, health, principal, onLogout }
         </div>
       </div>
     </aside>
+    </>
   )
 }

@@ -1,10 +1,12 @@
 import React from 'react'
 import { ProfileDropdown } from './ProfileDropdown'
 import type { DashboardPrincipal } from '../services/api'
-import { RefreshCw, CheckCircle2, AlertCircle, Clock } from 'lucide-react'
+import { RefreshCw, CheckCircle2, AlertCircle, Clock, Menu, X } from 'lucide-react'
 import type { TabType, GatewayHealth } from '../types'
 
 interface HeaderProps {
+  onMenu: () => void
+  mobileMenuOpen: boolean
   principal: DashboardPrincipal
   onSettings: () => void
   onLogout: () => void
@@ -62,7 +64,7 @@ const tabMeta: Record<TabType, { title: string; subtitle: string }> = {
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  principal, onSettings, onLogout, loggingOut,
+  principal, onSettings, onLogout, loggingOut, onMenu, mobileMenuOpen,
   currentTab,
   health,
   lastScraped,
@@ -76,7 +78,8 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="console-header h-16 px-6 bg-zinc-900/60 border-b border-zinc-800 flex items-center justify-between shrink-0 backdrop-blur-sm sticky top-0 z-10">
-      <div>
+      <button type="button" className="mobile-menu-trigger" onClick={onMenu} aria-label={mobileMenuOpen ? "Close navigation" : "Open navigation"} aria-expanded={mobileMenuOpen}>{mobileMenuOpen ? <X size={19} /> : <Menu size={19} />}</button>
+      <div className="header-title">
         <div className="header-breadcrumb">WORKSPACE <span>/</span> GATEWAY</div><h1 className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
           {meta.title}
         </h1>

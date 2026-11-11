@@ -34,10 +34,12 @@ import type {
 
 export function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('overview')
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [principal, setPrincipal] = useState<DashboardPrincipal | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
   const [sessionError, setSessionError] = useState('')
   const [authNotice, setAuthNotice] = useState('')
+  const [authConnectionError, setAuthConnectionError] = useState('')
   const [loggingOut, setLoggingOut] = useState(false)
   const sessionGeneration = useRef(0)
   const managementKey = principal ? '__session__' : ''
@@ -54,8 +56,8 @@ export function App() {
   const [apiKey, setApiKey] = useState<string>('')
 
   useEffect(() => {
-    fetchDashboardPrincipal().then(setPrincipal).catch((err: unknown) => {
-      console.error('Dashboard authentication check failed:', err)
+    fetchDashboardPrincipal().then(user => { setPrincipal(user); setAuthConnectionError('') }).catch(() => {
+      setAuthConnectionError('Could not reach the gateway. Check your connection and retry.')
     }).finally(() => setAuthChecked(true))
   }, [])
   const [lastPlaygroundResponse, setLastPlaygroundResponse] =
@@ -236,8 +238,8 @@ export function App() {
     finally { setLoggingOut(false) }
   }
 
-  if (!authChecked) return <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-sm text-zinc-400">Checking dashboard session…</div>
-  if (!principal) return <AuthScreen notice={authNotice} onAuthenticated={user => { setAuthNotice(''); setPrincipal(user) }} />
+  if (!authChecked) return <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-sm text-zinc-400" role="status">Checking dashboard session…</div>
+  if (!principal) return <AuthScreen notice={authConnectionError || authNotice} onAuthenticated={user => { setAuthNotice(''); setAuthConnectionError(''); setPrincipal(user) }} />
 
   return (
     <div className="console-app flex h-screen w-screen overflow-hidden bg-zinc-950 text-zinc-100 antialiased font-sans">
@@ -247,14 +249,17 @@ export function App() {
         onSelectTab={setCurrentTab}
         health={health}
         principal={principal}
-        onLogout={() => void handleLogout()}
+        mobileOpen={mobileNavOpen}
+        onCloseMobile={() => setMobileNavOpen(false)}
       />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0">
         <Header
           principal={principal}
-          onSettings={() => setCurrentTab('settings')}
+          onSettings={() => { setCurrentTab('settings'); setMobileNavOpen(false) }}
+          onMenu={() => setMobileNavOpen(value => !value)}
+          mobileMenuOpen={mobileNavOpen}
           onLogout={() => void handleLogout()}
           loggingOut={loggingOut}
           currentTab={currentTab}
